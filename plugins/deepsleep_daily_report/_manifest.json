@@ -1,0 +1,35 @@
+{
+  "manifest_version": 2,
+  "version": "1.0.0",
+  "name": "deepsleep 每日用量日报",
+  "description": "每天 0 点把前一天的 token 消耗与费用汇总，私聊发给主人。",
+  "author": {
+    "name": "deepsleep",
+    "url": "https://github.com/deepsleep"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "https://github.com/deepsleep/deepsleep-daily-report"
+  },
+  "host_application": {
+    "min_version": "1.3.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "send.text",
+    "chat.get_stream_by_user_id",
+    "chat.open_session"
+  ],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "id": "deepsleep.daily-report"
+}

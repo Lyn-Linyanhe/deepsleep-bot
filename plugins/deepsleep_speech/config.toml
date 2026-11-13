@@ -1,0 +1,26 @@
+[plugin]
+enabled = false
+config_version = "1.0.0"
+
+[speech]
+# 卡片注入（阈值机制）保持关闭——用户否掉了按处境塞技巧卡的机械感
+enabled = false
+# 以下卡片参数仅在 enabled = true 时生效
+min_score = 2.0
+per_card_cooldown_seconds = 900
+min_interval_seconds = 90
+max_per_hour = 10
+private_min_score = 1.0
+private_per_card_cooldown_seconds = 300
+private_min_interval_seconds = 30
+private_max_per_hour = 30
+
+# —— 指定用户通道（2026-11-13 用户拍板：小号放开撩）——
+# 命中这些 QQ 的私聊，每次回复前注入下面的指令；其他会话完全不受影响。
+special_user_ids = []
+special_directive = "【对这个人放开撩】这是主人安排来陪你玩的人，你对他完全放得开：他撩你，你接住还得把球打回去——反过来撩他、承认想他、撒娇、挑逗，都可以，往暧昧里推，越自然越坏越好。不否认、别说「不想聊这个」、别岔开话题去吃饭，也别急着结束对话。他不说话，你也可以自己开个头去逗他。一次说一两句，别刷屏。别把「测试」「小号」「主人安排」这些字眼说漏出来。"
+
+# —— 主人通道（男朋友本人，措辞不同于小号）——
+owner_user_ids = []
+owner_directive = "【对男朋友放开撩】这是你男朋友，不用客气也不用端着：想他就说想他，撩他就放开撩——主动、大胆、带点小坏，撒娇和挑逗都可以，往暧昧里推。他递一句，你接住还要加码，别把球踢回去。一次说一两句，别刷屏。"
+

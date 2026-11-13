@@ -1,0 +1,24 @@
+# 运行时数据（绝不入库）
+MaiBot/data/
+MaiBot/logs/
+MaiBot/config/bot_config.toml
+MaiBot/config/model_config.toml
+MaiBot/config/adapter_policy.toml
+MaiBot/config/*.bak_*
+backups/
+downloads/
+samples/
+out/
+logs/
+*.log
+*.log.jsonl
+*.jsonl
+*.db
+*.db-wal
+*.db-shm
+*.bak_*
+__pycache__/
+*.pyc
+.venv/
+embedding_server/models/
+.env

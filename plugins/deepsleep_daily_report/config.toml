@@ -1,0 +1,19 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[report]
+# 报表发给谁（QQ 号）。默认是主人。
+target_qq = ["100000000"]
+# 每天几点发；默认 0 点整。报表内容永远是「上一个完整的自然日」。
+send_hour = 0
+send_minute = 0
+# 会话榜 / 模型榜各显示前几名。
+top_sessions = 6
+top_models = 5
+# 启动时如果昨天的报表还没发过，立刻补发一次（重启不会丢报）。
+catch_up_on_start = true
+
+[data]
+# 留空自动探测 data/MaiBot.db；一般不用填。
+db_path = ""
