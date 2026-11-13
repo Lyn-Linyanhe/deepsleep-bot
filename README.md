@@ -1,13 +1,15 @@
 # deepsleep · 住在一台 Windows 主机里的 QQ 少女
 
-一个 **MaiBot 人格化改造**的完整实践：3 个自研插件、17 处上游源码补丁、一套被反复调教过的记忆与表达系统。
+一个 **MaiBot 人格化改造**的完整实践：3 个自研插件、28 个文件的上游源码补丁、一套被反复调教过的记忆与表达系统。
+
+> **English** — deepsleep is a persona-driven QQ chatbot built on [MaiBot](https://github.com/Mai-with-u/MaiBot): custom memory retrieval & decay, expression learning feedback, reply-safety guards, and three plugins (usage report, retrieval-based counselor, speech-card injector). This repo is a sanitized snapshot of that work — no keys, no chat data.
 
 deepsleep（中文自称「深眠」/「小睡」）是跑在 Windows 上的私人 QQ 机器人。本仓库不是 MaiBot 框架本身，而是建立在它之上的一整套"养成"工作——如何让一个通用聊天框架，长成一个说话像人、记得住事、有自己脾气和边界的角色。
 
 ## 仓库内容
 
 ```
-patches/            相对 MaiBot 上游的源码补丁（17 个文件 + 1 个新文件）
+patches/            相对 MaiBot 上游的源码补丁（28 个文件，含 1 个新文件）
 plugins/            3 个自研插件：每日用量日报 / 恋爱军师（停用）/ 说话提示（停用）
 config-templates/   配置模板：bot_config / model_config（全部占位符，无密钥）
 scripts/            守护进程、embedding 服务、Windows 启动脚本
@@ -94,7 +96,7 @@ flowchart TB
 
 ## 相对 MaiBot 上游的改动
 
-补丁覆盖四块（见 `patches/0001-maibot-deepsleep-customizations.patch`）：
+基线 **MaiBot v1.3.18（2026-10）**，28 个文件、约 870 行改动（见 `patches/0001-maibot-deepsleep-customizations.patch`）。
 
 - **记忆系统**：注入侧占位/近重复过滤与跨会话配额、检索遥测、段落时效衰减（24h 半衰期，取访问前快照避免结构性空转）、写侧占位总结拦截、画像与事实写回的模型链拆分
 - **表达学习**：快模式语境加权、反馈闭环（被怼 -1 / 表情回应 +1）、黑话毕业线调整
@@ -147,8 +149,8 @@ flowchart TB
 
 1. 克隆 [MaiBot](https://github.com/Mai-with-u/MaiBot) 并按其文档完成基础部署
 2. 应用补丁：`git apply patches/0001-maibot-deepsleep-customizations.patch`，再把 `patches/new-files/src/learners/expression_feedback.py` 放到对应位置
-3. 复制 `config-templates/*.toml` 到 `MaiBot/config/`，填入自己的密钥与账号
-4. 插件目录复制到 `MaiBot/plugins/`
-5. 启动本地 embedding 服务与 MaiBot（`scripts/` 里有参考启动脚本）
+3. 复制 `config-templates/*.toml` 到 `MaiBot/config/`，填入自己的密钥与账号（字段说明见 [config-templates/README.md](config-templates/README.md)）
+4. 插件目录复制到 `MaiBot/plugins/`（知识库正文需自建，见各插件 README）
+5. 启动本地 embedding 服务与 MaiBot（启动顺序与依赖见 [scripts/README.md](scripts/README.md)）
 
 > 本项目为个人兴趣实践，不提供开箱即用的托管服务。

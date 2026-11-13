@@ -1,3 +1,92 @@
+diff --git a/prompts/en-US/emoji_content_analysis.prompt b/prompts/en-US/emoji_content_analysis.prompt
+index 3f43068ab..3bc4cfa41 100644
+--- a/prompts/en-US/emoji_content_analysis.prompt
++++ b/prompts/en-US/emoji_content_analysis.prompt
+@@ -1,3 +1,10 @@
+ Input type: {image_type}
+ This is an emoji or sticker image. When the input type is GIF, the image is a horizontal strip of distinct frames extracted from an animation; when the input type is STATIC, it is a single static image.
+ Extract up to 5 tags describing the main emotion, tone, or common usage scenario. Separate the tags with commas. Return only the plain-text tag list, without explanations or any other content.
++
++Special note on DeepSeek imagery:
++- DeepSeek's official mascot is a small blue whale, often nicknamed "fatty fish" or "the whale".
++  Signature traits: blue palette, a round whale silhouette, or an anime girl with blue hair, blue eyes, whale ears, or a whale tail.
++- If the image shows that mascot, or contains the text "DeepSeek", "fatty fish", "whale", or "DS",
++  or is clearly a DeepSeek meme (complaining about server busy, token burn, deep-thinking mode),
++  include at least one of "DeepSeek", "whale", or "fatty fish" in the tags so retrieval can match it.
+diff --git a/prompts/zh-CN/emoji_content_analysis.prompt b/prompts/zh-CN/emoji_content_analysis.prompt
+index 839598569..a06a24f2d 100644
+--- a/prompts/zh-CN/emoji_content_analysis.prompt
++++ b/prompts/zh-CN/emoji_content_analysis.prompt
+@@ -1,3 +1,26 @@
+ 输入类型：{image_type}
+ 这是一个表情包图片。输入类型为 GIF 时，图片由动态图中抽取的不同帧横向拼接而成；输入类型为 STATIC 时，图片为单张静态图。
+-请提取这个表情包主要表达的情绪、语气或常见使用场景标签，最多 5 个，使用逗号分隔。只返回纯文本标签列表，不要解释或输出其他内容。
++
++请按以下维度提取标签，用逗号分隔，最多 8 个，按重要程度排序：
++
++1. 画面主体：图里是什么（人物、动物、物品、角色，例如「猫」「熊猫头」「二次元女孩」「柴犬」）
++2. 动作或表情：主体在干什么、什么表情（例如「竖大拇指」「流泪」「震惊」「摆手」「翻白眼」）
++3. 出处或梗名：能认出的作品、角色或著名梗（例如「猫和老鼠」「原神」「贴吧表情」「doge」「抽象」）；认不出就跳过
++4. 情绪：这张图传递的情绪（例如「得意」「无语」「嘲讽」「开心」「委屈」）
++5. 使用场景：什么场合适合发（例如「打招呼」「道谢」「反驳」「求饶」「表示无语」）
++
++特别注意 DeepSeek 相关形象：
++- DeepSeek 的官方形象是一只**蓝色小鲸鱼**，常被称为「大肥鱼」「鲸鲸」「鲸鱼」。
++  标志特征：蓝色系、圆润的鲸鱼造型，或蓝发蓝瞳的二次元角色带鲸鱼耳/鲸鱼尾。
++- 图里出现上述形象，或出现「DeepSeek」「deepseek」「大肥鱼」「鲸鲸」「DS」等字样，
++  或明显是 DeepSeek 相关的玩梗二创（比如吐槽它服务器繁忙、Token 消耗、深度思考），
++  请在第 3 维**明确写出「DeepSeek」「鲸鱼」「大肥鱼」中至少一个**，让检索能命中。
++
++要求：
++- 只返回纯文本标签列表，标签之间用英文逗号分隔，不要换行、不要编号、不要解释
++- 标签要具体口语化，避免「表情包」「图片」这类无信息量的词
++- 认不出的维度直接跳过，不要编造
++
++示例输出：
++熊猫头,竖大拇指,贴吧表情,赞,表示赞同
++蓝色小鲸鱼,DeepSeek,大肥鱼,圆润,可爱,表示认同
+diff --git a/src/A_memorix/core/image/asset_store.py b/src/A_memorix/core/image/asset_store.py
+index 496724f6f..0679db82b 100644
+--- a/src/A_memorix/core/image/asset_store.py
++++ b/src/A_memorix/core/image/asset_store.py
+@@ -15,6 +15,8 @@ _FORMAT_TO_MIME = {
+     "JPEG": "image/jpeg",
+     "PNG": "image/png",
+     "WEBP": "image/webp",
++    # GIF 仅用于通过 inspect 识别帧数；多帧走 runtime 的首帧转 PNG，单帧 GIF 同样会在此转码。
++    "GIF": "image/gif",
+ }
+ 
+ 
+diff --git a/src/A_memorix/core/image/runtime.py b/src/A_memorix/core/image/runtime.py
+index 7202fe733..31b21896d 100644
+--- a/src/A_memorix/core/image/runtime.py
++++ b/src/A_memorix/core/image/runtime.py
+@@ -18,6 +18,8 @@ from src.common.logger import get_logger
+ 
+ from ..storage import MetadataStore, QuantizationType, VectorStore
+ from .asset_store import ImageAssetStore, InspectedImage
++
++from PIL import Image as PILImage
+ from .component_paths import build_package_external_ref
+ from .embedder import ImageEmbedder
+ from .fingerprints import fingerprint_hash
+@@ -220,7 +222,14 @@ class ImageMemoryRuntime:
+     def _publish_asset_only(self, image_bytes: bytes) -> tuple[Dict[str, Any], InspectedImage]:
+         inspected = self.asset_store.inspect(image_bytes)
+         if inspected.frame_count > 1:
+-            raise ValueError("当前图片记忆只支持静态图片")
++            # 动图（GIF/APNG/WebP）只记首帧：逐帧向量化成本高，对"记得这张图长什么样"没有增益。
++            # 必须在 publish 之前转换——publish 用原始 bytes 落盘，只改元数据会造成格式错配。
++            with PILImage.open(BytesIO(bytes(image_bytes))) as animated:
++                animated.seek(0)
++                converted = BytesIO()
++                animated.convert("RGB").save(converted, format="PNG")
++            image_bytes = converted.getvalue()
++            inspected = self.asset_store.inspect(image_bytes)
+         digest, storage_key = self.asset_store.publish(image_bytes, inspected)
+         with self.metadata_store.transaction(immediate=True) as database:
+             asset = self.metadata_store.upsert_image_asset(
 diff --git a/src/A_memorix/core/retrieval/dual_path.py b/src/A_memorix/core/retrieval/dual_path.py
 index b5446b12d..a48b16d41 100644
 --- a/src/A_memorix/core/retrieval/dual_path.py
@@ -313,6 +402,57 @@ index f05e3a3c0..620646dd0 100644
              # 人物归属由程序给出的标记和 ID 确定；名称只在写入前按持久映射恢复。
              identity_metadata = identity_context.metadata(
                  [summary_text, *entities, *(value for relation in relations for value in relation.values()),
+diff --git a/src/agent/provider.py b/src/agent/provider.py
+index 5624bc6db..945f62329 100644
+--- a/src/agent/provider.py
++++ b/src/agent/provider.py
+@@ -13,6 +13,12 @@ from .service import AgentService, agent_service
+ 
+ CHAT_TOOLS = {"agent_talk", "agent_status"}
+ 
++# agent_talk 的主人账号白名单：这些 QQ 号（不分私聊还是群聊）可以让外接 Agent 干活。
++# 外接 Agent 能读写工作区、跑命令、联网，所以只认账号本身——是不是主人，
++# 与"在哪说话"无关：主人在群里说话同样有效。其余任何人（含群友）都不可用。
++# 是否该动手由她按语义判断，不做关键词匹配——按字面匹配既漏判又折磨使用者。
++OWNER_QQ_IDS = {"100000000"}
++
+ 
+ def tool_specs() -> List[ToolSpec]:
+     definitions = [
+@@ -45,10 +51,14 @@ class AgentToolProvider:
+         if not self.service.config.enabled:
+             return []
+         trusted = context is not None and context.session_id == self.service.agent_id
++        owner_account = context is not None and str(context.user_id or "").strip() in OWNER_QQ_IDS
+         tools = []
+         for spec in tool_specs():
+             if not trusted and spec.name not in CHAT_TOOLS:
+                 continue
++            if spec.name == "agent_talk" and not trusted and not owner_account:
++                # 传话工具只对主人账号可见（私聊、群聊都算）；别人看不到也无法指使她的"手"。
++                continue
+             if trusted:
+                 spec.metadata["visibility"] = "visible"
+             tools.append(spec)
+@@ -62,6 +72,18 @@ class AgentToolProvider:
+             name, args = invocation.tool_name, invocation.arguments
+             if name not in CHAT_TOOLS:
+                 self.service.require_owner(context.session_id)
++            # agent_talk 只认主人账号（私聊或群聊均可）。判定依据由上下文给出的
++            # speaker_ids（本批出现的发言者）决定：只要其中包含主人，就允许。
++            # 非主人返回可读的工具结果，不抛异常——异常会被下面的 OSError 分支吞成 traceback。
++            if name == "agent_talk" and context.session_id != self.service.agent_id:
++                speakers = context.metadata.get("speaker_ids") if context.metadata else None
++                if isinstance(speakers, (list, tuple, set)) and speakers:
++                    allowed = any(str(s).strip() in OWNER_QQ_IDS for s in speakers)
++                else:
++                    allowed = str(context.user_id or "").strip() in OWNER_QQ_IDS
++                if not allowed:
++                    msg = "agent 功能只对主人开放；当前说话的人不是主人，不能使用。"
++                    return ToolExecutionResult(tool_name=name, success=False, error_message=msg, content=msg)
+             result: Dict[str, Any]
+             if name == "agent_talk":
+                 result = await messaging.tell(self.service, context.session_id, args["text"], args.get("target", ""), args.get("images", []))
 diff --git a/src/chat/replyer/maisaka_expression_selector.py b/src/chat/replyer/maisaka_expression_selector.py
 index 88421df17..628315413 100644
 --- a/src/chat/replyer/maisaka_expression_selector.py
@@ -555,6 +695,30 @@ index 55db99831..a686fd60d 100644
          except asyncio.TimeoutError as e:
              task_display = self.request_type or self.task_name or "未知任务"
              timeout_error = LLMTaskTimeoutError(
+diff --git a/src/maisaka/builtin_tool/__init__.py b/src/maisaka/builtin_tool/__init__.py
+index c5842ce42..12561cd0f 100644
+--- a/src/maisaka/builtin_tool/__init__.py
++++ b/src/maisaka/builtin_tool/__init__.py
+@@ -20,6 +20,10 @@ from .read_tool_result import get_tool_spec as get_read_tool_result_tool_spec
+ from .read_tool_result import handle_tool as handle_read_tool_result_tool
+ from .reply import get_tool_spec as get_reply_tool_spec
+ from .reply import handle_tool as handle_reply_tool
++from .save_emoji import get_tool_spec as get_save_emoji_tool_spec
++from .save_emoji import handle_tool as handle_save_emoji_tool
++from .send_gallery_pic import get_tool_spec as get_send_gallery_pic_tool_spec
++from .send_gallery_pic import handle_tool as handle_send_gallery_pic_tool
+ from .send_emoji import get_tool_spec as get_send_emoji_tool_spec
+ from .send_emoji import handle_tool as handle_send_emoji_tool
+ from .show_emoji_list import get_tool_spec as get_show_emoji_list_tool_spec
+@@ -113,6 +117,8 @@ BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
+     ),
+     BuiltinToolEntry("send_emoji", get_send_emoji_tool_spec, handle_send_emoji_tool, stage="action"),
+     BuiltinToolEntry("show_emoji_list", get_show_emoji_list_tool_spec, handle_show_emoji_list_tool, stage="action"),
++    BuiltinToolEntry("save_emoji", get_save_emoji_tool_spec, handle_save_emoji_tool, stage="action"),
++    BuiltinToolEntry("send_gallery_pic", get_send_gallery_pic_tool_spec, handle_send_gallery_pic_tool, stage="action"),
+     BuiltinToolEntry("tool_search", get_tool_search_tool_spec, handle_tool_search_tool, stage="action"),
+     BuiltinToolEntry("subagent", get_subagent_tool_spec, handle_subagent_tool, stage="action"),
+     BuiltinToolEntry("subagent_status", get_subagent_status_tool_spec, handle_subagent_status_tool, stage="action"),
 diff --git a/src/maisaka/builtin_tool/reply.py b/src/maisaka/builtin_tool/reply.py
 index b9551f8ca..1a5b56d14 100644
 --- a/src/maisaka/builtin_tool/reply.py
@@ -667,6 +831,265 @@ index b9551f8ca..1a5b56d14 100644
      target_user_info = target_message.message_info.user_info
      bot_name = config_module.global_config.bot.nickname.strip() or "MaiSaka"
      if is_bot_self(tool_ctx.runtime.chat_stream.platform, target_user_info.user_id):
+diff --git a/src/maisaka/builtin_tool/save_emoji.py b/src/maisaka/builtin_tool/save_emoji.py
+new file mode 100644
+index 000000000..3f2bd087e
+--- /dev/null
++++ b/src/maisaka/builtin_tool/save_emoji.py
+@@ -0,0 +1,93 @@
++"""把聊天里的图片存进自己的表情包库（按指令存图，区别于自动收集）。"""
++
++from typing import Optional
++
++from src.common.data_models.message_component_data_model import ImageComponent
++from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
++from src.emoji_system.emoji_manager import emoji_manager
++from src.maisaka.context.image_attachment import resolve_context_image
++from src.maisaka.context.messages import ContentContextMessage
++
++from .context import BuiltinToolRuntimeContext
++
++
++def get_tool_spec() -> ToolSpec:
++    return ToolSpec(
++        name="save_emoji",
++        description=(
++            "把聊天里出现过的图片保存进你自己的表情包库，之后可以像其他表情包一样发出去。"
++            "默认保存最近一张图；想存指定的某张，把那条消息的 msg_id 传进来。"
++            "保存后系统会自动识别内容并打标签，稍等片刻就能用。"
++        ),
++        parameters_schema={
++            "type": "object",
++            "properties": {
++                "msg_id": {
++                    "type": "string",
++                    "description": "要保存的图片所在消息的 msg_id；不填则保存最近一张图。",
++                },
++                "image_index": {
++                    "type": "integer",
++                    "description": "该消息里的第几张图（从 0 开始），默认 0。",
++                },
++            },
++        },
++        provider_name="maisaka_builtin",
++        provider_type="builtin",
++    )
++
++
++def _find_latest_image_msg_id(tool_ctx: BuiltinToolRuntimeContext) -> Optional[str]:
++    """从当前上下文里找最近一条带图消息的 msg_id。"""
++    for message in reversed(tool_ctx.runtime._chat_history):
++        if not isinstance(message, ContentContextMessage):
++            continue
++        if any(isinstance(component, ImageComponent) for component in message.raw_message.components):
++            return message.message_id
++    return None
++
++
++async def handle_tool(
++    tool_ctx: BuiltinToolRuntimeContext,
++    invocation: ToolInvocation,
++    context: Optional[ToolExecutionContext] = None,
++) -> ToolExecutionResult:
++    args = invocation.arguments or {}
++    msg_id = str(args.get("msg_id") or "").strip()
++    image_index = args.get("image_index", 0)
++    try:
++        image_index = int(image_index)
++    except (TypeError, ValueError):
++        image_index = 0
++
++    if not msg_id:
++        msg_id = _find_latest_image_msg_id(tool_ctx)
++        if not msg_id:
++            return tool_ctx.build_failure_result(
++                invocation.tool_name, "当前聊天里没有找到图片。让 TA 重新发一次图再存。"
++            )
++
++    try:
++        image = await resolve_context_image(tool_ctx.runtime, msg_id, image_index)
++    except ValueError as exc:
++        return tool_ctx.build_failure_result(invocation.tool_name, f"找不到要存的图片：{exc}")
++    if not image.binary_data:
++        return tool_ctx.build_failure_result(invocation.tool_name, "图片数据读取失败，稍后再试一次。")
++
++    try:
++        emoji = await emoji_manager.ensure_emoji_saved(image.binary_data)
++    except ValueError as exc:
++        return tool_ctx.build_failure_result(invocation.tool_name, str(exc))
++    except Exception as exc:  # noqa: BLE001 - 存储层异常统一转为工具失败
++        return tool_ctx.build_failure_result(invocation.tool_name, f"保存图片时出错：{exc}")
++
++    status = await emoji_manager.register_emoji_by_filename(emoji.full_path)
++    if status == "registered":
++        text = "已存入你的表情包库，自动打标后就能用了。"
++    elif status == "skipped":
++        text = "这张图已经在你的表情包库里了，不用重复存。"
++    else:
++        return tool_ctx.build_failure_result(
++            invocation.tool_name, "这张图没能入库（可能没通过内容审核或识别失败）。"
++        )
++    return tool_ctx.build_success_result(invocation.tool_name, text)
+diff --git a/src/maisaka/builtin_tool/send_gallery_pic.py b/src/maisaka/builtin_tool/send_gallery_pic.py
+new file mode 100644
+index 000000000..92450c529
+--- /dev/null
++++ b/src/maisaka/builtin_tool/send_gallery_pic.py
+@@ -0,0 +1,112 @@
++"""发送图库里已有的人像照片，避免每次都重新生图。"""
++
++import base64
++import json
++from pathlib import Path
++from typing import Optional
++
++from src.common.data_models.message_component_data_model import ImageComponent
++from src.common.data_models.mai_message_data_model import MessageSequence
++from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
++
++from .context import BuiltinToolRuntimeContext, PostProcessedReplyMessage
++
++GALLERY_PATH = Path(__file__).resolve().parents[3] / "plugins" / "a-dawn_oaimage" / "assets" / "outfits" / "gallery.json"
++
++
++def _load_gallery() -> list[dict]:
++    """读取图库索引；读不到就返回空（工具会降级为提示）。"""
++    try:
++        if not GALLERY_PATH.is_file():
++            return []
++        return json.loads(GALLERY_PATH.read_text(encoding="utf-8"))
++    except Exception:
++        return []
++
++
++def get_tool_spec() -> ToolSpec:
++    gallery = _load_gallery()
++    if gallery:
++        options = "；".join(
++            f"{index}. {item.get('scene', '')}（{item.get('outfit', '')}，{item.get('mood', '')}）"
++            for index, item in enumerate(gallery, start=1)
++        )
++    else:
++        options = "（图库为空）"
++    return ToolSpec(
++        name="send_gallery_pic",
++        description=(
++            "发送一张【已经拍好的】自己的照片，秒发、不消耗生图额度。"
++            f"现有照片：{options}。"
++            "对方要照片、要自拍、问你在干嘛时，**先看这里有没有合适的**——"
++            "场景对得上就直接发这张，比重新生成快得多（生成要等好几分钟）。"
++            "只有这里没有合适的场景时，才去用 generate_image 新画一张。"
++        ),
++        parameters_schema={
++            "type": "object",
++            "properties": {
++                "index": {
++                    "type": "integer",
++                    "description": f"要发第几张，从 1 开始，范围 1-{max(len(gallery), 1)}。",
++                    "minimum": 1,
++                    "maximum": max(len(gallery), 1),
++                },
++                "text": {
++                    "type": "string",
++                    "description": "配一句话（可选）。不填就只发图。",
++                },
++            },
++            "required": ["index"],
++        },
++        provider_name="maisaka_builtin",
++        provider_type="builtin",
++    )
++
++
++async def handle_tool(
++    tool_ctx: BuiltinToolRuntimeContext,
++    invocation: ToolInvocation,
++    context: Optional[ToolExecutionContext] = None,
++) -> ToolExecutionResult:
++    gallery = _load_gallery()
++    if not gallery:
++        return tool_ctx.build_failure_result(invocation.tool_name, "图库是空的，让用户把照片放进 assets/outfits 并重建 gallery.json。")
++
++    args = invocation.arguments or {}
++    try:
++        index = int(args.get("index", 0))
++    except (TypeError, ValueError):
++        index = 0
++    if not 1 <= index <= len(gallery):
++        return tool_ctx.build_failure_result(
++            invocation.tool_name, f"序号要在 1-{len(gallery)} 之间，你给的是 {args.get('index')}。"
++        )
++
++    item = gallery[index - 1]
++    path = Path(str(item.get("path", "")))
++    if not path.is_file():
++        return tool_ctx.build_failure_result(invocation.tool_name, f"这张照片文件不见了：{path.name}")
++
++    try:
++        data = path.read_bytes()
++    except OSError as exc:
++        return tool_ctx.build_failure_result(invocation.tool_name, f"读不到照片：{exc}")
++
++    # binary_data 必须给原始字节：发送链路靠它上传，content 只是展示用。
++    image_component = ImageComponent(
++        binary_hash=item.get("file", path.name),
++        content=base64.b64encode(data).decode("ascii"),
++        binary_data=data,
++    )
++
++    # 图片作为独立消息跟在文字后面发出去，和 reply 的附件走同一条链路。
++    post_messages: list[PostProcessedReplyMessage] = [
++        PostProcessedReplyMessage(sequence=MessageSequence([image_component]))
++    ]
++    text = str(args.get("text") or "").strip()
++    result_text = f"已发送照片：{item.get('scene', '')}"
++    return tool_ctx.build_success_result(
++        invocation.tool_name,
++        content=text or result_text,
++        post_history_messages=post_messages,
++    )
+diff --git a/src/maisaka/builtin_tool/wait.py b/src/maisaka/builtin_tool/wait.py
+index 9232f42c2..ae1b086d0 100644
+--- a/src/maisaka/builtin_tool/wait.py
++++ b/src/maisaka/builtin_tool/wait.py
+@@ -7,6 +7,9 @@ from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvo
+ 
+ from .context import BuiltinToolRuntimeContext
+ 
++_DEFAULT_WAIT_SECONDS = 5
++_MAX_WAIT_SECONDS = 5
++
+ 
+ def get_tool_spec() -> ToolSpec:
+     """获取 wait 工具声明。"""
+@@ -19,7 +22,9 @@ def get_tool_spec() -> ToolSpec:
+             "properties": {
+                 "seconds": {
+                     "type": "integer",
+-                    "description": "等待秒数。",
++                    "description": f"等待秒数，最多 {_MAX_WAIT_SECONDS} 秒，超出会被截断。",
++                    "minimum": 0,
++                    "maximum": _MAX_WAIT_SECONDS,
+                 },
+             },
+             "required": ["seconds"],
+@@ -37,12 +42,13 @@ async def handle_tool(
+     """执行 wait 内置工具。"""
+ 
+     del context
+-    seconds = invocation.arguments.get("seconds", 30)
++    seconds = invocation.arguments.get("seconds", _DEFAULT_WAIT_SECONDS)
+     try:
+         wait_seconds = int(seconds)
+     except (TypeError, ValueError):
+-        wait_seconds = 30
+-    wait_seconds = max(0, wait_seconds)
++        wait_seconds = _DEFAULT_WAIT_SECONDS
++    # 上限封顶：等待过久会让对方长时间收不到回应，私聊体验尤其差。
++    wait_seconds = max(0, min(wait_seconds, _MAX_WAIT_SECONDS))
+     current_count = tool_ctx.runtime._enter_counted_wait_state(
+         seconds=wait_seconds,
+         tool_call_id=invocation.call_id,
 diff --git a/src/maisaka/memory/heuristic_injector.py b/src/maisaka/memory/heuristic_injector.py
 index be09f93a8..26854a877 100644
 --- a/src/maisaka/memory/heuristic_injector.py
@@ -874,6 +1297,124 @@ index c62bcba61..3afd89c7e 100644
          f"{joined_blocks}\n\n"
          "使用时把它当作对当前人物的背景理解；若与当前对话冲突，以当前对话为准。"
      )
+diff --git a/src/maisaka/reasoning_engine.py b/src/maisaka/reasoning_engine.py
+index 03b547d9f..672cce0ed 100644
+--- a/src/maisaka/reasoning_engine.py
++++ b/src/maisaka/reasoning_engine.py
+@@ -140,6 +140,9 @@ class CycleRuntimeState:
+     cycle_end: CycleEnd = field(default_factory=lambda: CycleEnd("continue", "本轮思考完成，继续后续内部轮次。"))
+     tool_result_summaries: list[str] = field(default_factory=list)
+     tool_monitor_results: list[dict[str, Any]] = field(default_factory=list)
++    # 本回合是否已经成功调用过 reply（即已经"开口"）；已开口的回合不再被新消息打断，
++    # 避免她想好的话因对方补一句而整段作废。
++    reply_sent: bool = False
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -202,8 +205,13 @@ class MaisakaReasoningEngine:
+         self._runtime._planner_interrupt.bind(interrupt_flag)
+         self._runtime._chat_loop_service.set_interrupt_flag(interrupt_flag)
+         try:
+-            if global_config.chat.reply_timing.planner_message_steering and self._runtime._has_pending_messages():
++            if (
++                global_config.chat.reply_timing.planner_message_steering
++                and self._runtime._has_pending_messages()
++                and not getattr(self._runtime, "_turn_reply_sent", False)
++            ):
+                 # 覆盖整理上下文到绑定中断标记之间收到消息的窗口。
++                # 本回合已经开口回复过时不打断：让她把想到的补充说完，新消息留给下一回合处理。
+                 interrupt_flag.set()
+             planner_task = asyncio.create_task(
+                 self._runtime._chat_loop_service.chat_loop_step(
+@@ -929,6 +937,8 @@ class MaisakaReasoningEngine:
+                     self._turn_passive_replyer = global_config.experimental.passive_replyer
+                     self._runtime._chat_loop_service.passive_replyer_override = self._turn_passive_replyer
+                     self._active_logical_turn_id = turn_start_context.logical_turn_id or uuid.uuid4().hex
++                    # 新逻辑回合重置"已开口"标记；主动任务同理，防止跨回合串味。
++                    self._runtime._turn_reply_sent = False
+                     if force_continue_reason := self._runtime._consume_forced_turn_reason():
+                         logger.info(f"{self._runtime.log_prefix} {force_continue_reason}")
+                     round_index = 0
+@@ -1447,6 +1457,30 @@ class MaisakaReasoningEngine:
+             f"工具={tool_call.func_name} 调用ID={tool_call.call_id}"
+         )
+ 
++    @staticmethod
++    def _current_speaker_ids(runtime: "MaisakaHeartFlowChatting") -> list[str]:
++        """本批消息里出现过的发言者 QQ（群聊/私聊都适用，保持出现顺序去重）。
++
++        chat_stream.user_id 在群聊里是空的，只有私聊才填对端 QQ，所以必须从消息本身取。
++        """
++
++        def _uid_of(message: object) -> str:
++            info = getattr(message, "message_info", None)
++            user_info = getattr(info, "user_info", None) if info is not None else None
++            return str(getattr(user_info, "user_id", "") or "").strip()
++
++        seen: list[str] = []
++        for message in list(getattr(runtime, "message_cache", None) or []):
++            uid = _uid_of(message)
++            if uid and uid not in seen:
++                seen.append(uid)
++        if not seen:
++            chat_stream = getattr(runtime, "chat_stream", None)
++            fallback = str(getattr(chat_stream, "user_id", "") or "").strip()
++            if fallback:
++                seen.append(fallback)
++        return seen
++
+     def _build_tool_availability_context(self) -> ToolAvailabilityContext:
+         """构造当前聊天的工具暴露上下文。"""
+ 
+@@ -1456,7 +1490,7 @@ class MaisakaReasoningEngine:
+             stream_id=self._runtime.session_id,
+             is_group_chat=chat_stream.is_group_session,
+             group_id=str(getattr(chat_stream, "group_id", "") or "").strip(),
+-            user_id=str(getattr(chat_stream, "user_id", "") or "").strip(),
++            user_id=(speakers[-1] if (speakers := self._current_speaker_ids(self._runtime)) else ""),
+             platform=str(getattr(chat_stream, "platform", "") or "").strip(),
+         )
+ 
+@@ -1480,8 +1514,9 @@ class MaisakaReasoningEngine:
+             reasoning=latest_thought,
+             is_group_chat=chat_stream.is_group_session,
+             group_id=str(getattr(chat_stream, "group_id", "") or "").strip(),
+-            user_id=str(getattr(chat_stream, "user_id", "") or "").strip(),
++            user_id=(speakers[-1] if (speakers := self._current_speaker_ids(self._runtime)) else ""),
+             platform=str(getattr(chat_stream, "platform", "") or "").strip(),
++            metadata={"speaker_ids": self._current_speaker_ids(self._runtime)},
+         )
+ 
+     @staticmethod
+@@ -2144,6 +2179,10 @@ class MaisakaReasoningEngine:
+ 
+             if not result.success and tool_call.func_name == "reply":
+                 logger.warning(f"{self._runtime.log_prefix} 回复工具未生成可见消息，将继续下一轮循环")
++            if result.success and tool_call.func_name == "reply":
++                # 已经开口：本回合后续轮次不再被新消息打断，让她把补充说完。
++                state.reply_sent = True
++                self._runtime._turn_reply_sent = True
+ 
+             if result.success and result.stop_after_execution:
+                 should_stop_after_execution = True
+diff --git a/src/maisaka/runtime.py b/src/maisaka/runtime.py
+index bcc8f7071..cee1b6971 100644
+--- a/src/maisaka/runtime.py
++++ b/src/maisaka/runtime.py
+@@ -1048,6 +1048,13 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
+         """快速反应模式下，用新消息打断运行中的 Planner。"""
+         if not global_config.chat.reply_timing.planner_message_steering or self._agent_state != self._STATE_RUNNING:
+             return
++        if getattr(self, "_turn_reply_sent", False):
++            # 本回合已经开过口：不再打断，让她把补说完；新消息进入缓存，下一回合处理。
++            logger.debug(
++                f"{self.log_prefix} 本回合已回复过，跳过规划器打断; "
++                f"消息编号={message.message_id}"
++            )
++            return
+ 
+         request_result = self._planner_interrupt.request()
+         if request_result == "idle":
 diff --git a/src/plugin_runtime/component_query.py b/src/plugin_runtime/component_query.py
 index 6bff5e77c..7b2457ee2 100644
 --- a/src/plugin_runtime/component_query.py
