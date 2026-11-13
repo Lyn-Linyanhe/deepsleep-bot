@@ -16,6 +16,72 @@ LICENSE             GPL-3.0（继承 MaiBot 上游）
 NOTICE.md           第三方与许可说明
 ```
 
+## 架构
+
+```mermaid
+flowchart TB
+    subgraph QQ["QQ"]
+        U1["群聊"]
+        U2["私聊"]
+    end
+
+    subgraph EDGE["聊天网关"]
+        SL["SnowLuma（Node）<br/>QQ 协议 ↔ 本地桥"]
+    end
+
+    subgraph CORE["MaiBot 主进程 :8001（WebUI / 热重载）"]
+        HF["HeartFlow<br/>消息流 · 唤醒判断"]
+        subgraph MAISAKA["Maisaka 对话核心"]
+            PL["Planner<br/>回不回 / 调什么工具"]
+            RP["Replyer<br/>生成最终回复"]
+        end
+        subgraph PLUGINS["插件运行时（2 条 runner 链）"]
+            P1["snowluma_adapter"]
+            P2["deepsleep_daily_report"]
+            P3["deepsleep_counselor（停用）"]
+            P4["deepsleep_speech（停用）"]
+            P5["MaiTrace / 表情 / TTS …"]
+        end
+        subgraph MEM["A_Memorix 记忆系统"]
+            M1["段落 · 事件 · 事实 · 画像 · 图片"]
+            M5["巩固链<br/>摘要 → 分段 → 画像 → 去重"]
+        end
+        EL["表达学习"]
+        SS["send_service"]
+    end
+
+    subgraph SERVICES["本地服务"]
+        EMB["embedding 服务 :8100"]
+        GD["guardian.py<br/>探活 · 自愈"]
+    end
+
+    subgraph LLM["模型渠道"]
+        L1["免费组（2 并发）"]
+        L2["flex（0.25×）"]
+        L3["luna（GPT 组）"]
+    end
+
+    U1 --> SL
+    U2 --> SL
+    SL --> P1 --> HF --> PL
+    PL -->|工具调用| P1
+    PL --> RP
+    RP --> SS --> P1 --> SL
+    RP -.->|召回注入| MEM
+    HF -.->|落库 / 写回| M5
+    PL --> LLM
+    RP --> LLM
+    M5 --> LLM
+    P2 --> PL
+    P3 --> PL
+    P4 --> PL
+    EL --> RP
+    GD -.->|探活| CORE
+    GD -.->|探活| EMB
+```
+
+更多图（消息时序、记忆读写链、说话分层）见 [docs/architecture.md](docs/architecture.md)。
+
 ## 三个插件
 
 | 插件 | 作用 | 状态 |
