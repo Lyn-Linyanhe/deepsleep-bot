@@ -10,6 +10,8 @@ deepsleep（中文自称「深眠」/「小睡」）是跑在 Windows 上的私�
 
 ```
 patches/            相对 MaiBot 上游的源码补丁（28 个文件，含 1 个新文件）
+tests/              离线单元测试（7 组 / 112 项，AST 提取源码运行）
+images/             界面截图
 plugins/            3 个自研插件：每日用量日报 / 恋爱军师（停用）/ 说话提示（停用）
 config-templates/   配置模板：bot_config / model_config（全部占位符，无密钥）
 scripts/            守护进程、embedding 服务、Windows 启动脚本
@@ -84,6 +86,14 @@ flowchart TB
 
 更多图（消息时序、记忆读写链、说话分层）见 [docs/architecture.md](docs/architecture.md)。
 
+## 界面
+
+![仪表盘](images/dashboard.png)
+
+![详细统计](images/statistics.png)
+
+![插件配置（主题知识检索插件，当前停用）](images/plugin-config.png)
+
 ## 三个插件
 
 | 插件 | 作用 | 状态 |
@@ -93,6 +103,15 @@ flowchart TB
 | `deepsleep_speech` | replyer/planner 请求前按处境注入"说话提示"；支持指定用户通道 | 停用（结构保留） |
 
 后两个插件的知识正文（约 30 万字的第三方知识库衍生内容）按许可证要求**未随仓库发布**，仅保留程序结构；`knowledge/` 与 `cards/` 目录里有自建格式说明。
+
+## 测试
+
+`tests/` 里有 7 组离线单元测试（共 112 项）：AST 提取源码函数在内存里跑，不联网、不写库、不调模型。运行方式见 [tests/README.md](tests/README.md)。
+
+```bash
+set DEEPSLEEP_WORKSPACE=D:\deepsleep
+python tests/test_speech_injector.py
+```
 
 ## 相对 MaiBot 上游的改动
 
