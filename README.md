@@ -84,7 +84,7 @@ flowchart TB
     GD -.->|探活| EMB
 ```
 
-更多图（消息时序、记忆读写链、说话分层）见 [docs/architecture.md](docs/architecture.md)。
+更多图（消息时序、记忆读写链、说话分层）见 [docs/architecture.md](docs/architecture.md)；完整版静态图（可缩放、含端口与任务链）：[docs/architecture-full.svg](docs/architecture-full.svg)。
 
 ## 界面
 

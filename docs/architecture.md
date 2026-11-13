@@ -1,8 +1,12 @@
 # 架构
 
-四张图：总体组件、一条消息的旅程、记忆系统读写链、说话的分层。
+## 1. 完整架构（静态图）
 
-## 1. 总体组件
+![deepsleep 完整系统架构](architecture-full.svg)
+
+> 完整版：全部进程、端口（8001 / 8100）、插件清单、模型任务链与五条数据流（收消息 / 回复 / 记忆读写 / 模型调用 / 运维控制）。下方四张 Mermaid 分图按主题拆开展示。
+
+## 2. 总体组件（简化）
 
 ```mermaid
 flowchart TB
@@ -70,7 +74,7 @@ flowchart TB
     GD -.->|探活| EMB
 ```
 
-## 2. 一条消息的旅程
+## 3. 一条消息的旅程
 
 ```mermaid
 sequenceDiagram
@@ -99,7 +103,7 @@ sequenceDiagram
     H->>M: 异步写回（摘要 → 事件 → 事实 → 画像）
 ```
 
-## 3. 记忆系统读写链
+## 4. 记忆系统读写链
 
 ```mermaid
 flowchart LR
@@ -123,7 +127,7 @@ flowchart LR
     DECAY --> TOPK["top-k 注入回复"]
 ```
 
-## 4. 说话的分层
+## 5. 说话的分层
 
 ```mermaid
 flowchart TD
