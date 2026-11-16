@@ -3,6 +3,7 @@
 # 接口：POST /v1/embeddings（input: str | list[str]，可选 model/dimensions 参数，dimensions 忽略——bge-m3 固定 1024 维）。
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any, List, Union
 
@@ -14,17 +15,26 @@ from fastembed import TextEmbedding
 MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
 DIMENSION = 1024
 MAX_BATCH = 64
+MAX_CONCURRENT_REQUESTS = 2
 
 app = FastAPI(title="deepsleep local embedding")
 
 _model: TextEmbedding | None = None
+_inference_slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 
 
 def get_model() -> TextEmbedding:
     global _model
     if _model is None:
         # 模型文件缓存在本目录 models/ 下，首次启动会下载约 1.2 GB
-        _model = TextEmbedding(model_name=MODEL_NAME, cache_dir="models")
+        # enable_cpu_mem_arena=False：ORT 默认 CPU arena 在负载下只扩不还——实测 96 条文本
+        # 让私有内存从 2.5GB 涨到 3.6GB；关闭后同样负载只涨 ~7MB，稳定在模型自身大小。
+        # 代价是每次推理少一点分配复用，对本地小批量影响可忽略。
+        _model = TextEmbedding(
+            model_name=MODEL_NAME,
+            cache_dir="models",
+            enable_cpu_mem_arena=False,
+        )
     return _model
 
 
@@ -36,7 +46,7 @@ class EmbeddingRequest(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
+async def health() -> dict[str, Any]:
     return {"status": "ok", "model": MODEL_NAME, "dimension": DIMENSION}
 
 
@@ -51,6 +61,8 @@ def embeddings(req: EmbeddingRequest) -> dict[str, Any]:
     texts = [t if isinstance(t, str) else str(t) for t in texts]
     if not texts or any(not t.strip() for t in texts):
         raise HTTPException(status_code=400, detail="input 不能为空")
+    if not _inference_slots.acquire(timeout=120):
+        raise HTTPException(status_code=503, detail="embedding 并发繁忙，请稍后重试")
     try:
         model = get_model()
         vectors: List[List[float]] = []
@@ -61,6 +73,8 @@ def embeddings(req: EmbeddingRequest) -> dict[str, Any]:
         raise
     except Exception as exc:  # noqa: BLE001 - 对外统一 500，本地服务无需细分
         raise HTTPException(status_code=500, detail=f"embedding failed: {exc}") from exc
+    finally:
+        _inference_slots.release()
     if len(vectors) != len(texts):
         raise HTTPException(status_code=500, detail=f"返回数量不符: {len(vectors)} != {len(texts)}")
     return {

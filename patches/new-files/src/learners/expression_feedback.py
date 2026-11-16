@@ -97,20 +97,35 @@ class ExpressionFeedbackService:
     def _observe_sync(self, message: Any) -> Dict[str, Any] | None:
         text = str(getattr(message, "processed_plain_text", "") or "").strip()
         reply_to = str(getattr(message, "reply_to", "") or "").strip()
-        is_reaction = text.startswith(_REACTION_PREFIX)
+        session_id = str(getattr(message, "session_id", "") or "").strip()
+        message_id = str(getattr(message, "message_id", "") or "").strip()
+        if not session_id or not message_id:
+            return None
+        info = getattr(message, "message_info", None)
+        additional = getattr(info, "additional_config", None) or {}
+        is_reaction = bool(getattr(message, "is_notify", False)) and additional.get("napcat_notice_type") == "group_msg_emoji_like"
         if is_reaction:
-            target_ids = [match.group(1) for match in _REACTION_ID_PATTERN.finditer(text)]
-        elif reply_to:
+            payload = additional.get("napcat_notice_payload")
+            if not isinstance(payload, dict) or not payload.get("message_id") or not payload.get("user_id"):
+                return None
+            target_ids = [str(payload["message_id"])]
+            # 同一人对同一消息的回应只计一次，不以随机通知包装 ID 去重。
+            event_key = "reaction:" + str(payload["user_id"]) + ":" + target_ids[0]
+        elif reply_to and not getattr(message, "is_notify", False):
+            if not _NEGATIVE_PATTERN.search(text):
+                return None
             target_ids = [reply_to]
+            event_key = "reply:" + message_id
         else:
             return None
-        if not target_ids:
-            return None
 
-        mappings = self._lookup(target_ids)
+        mappings = self._lookup(target_ids, session_id)
         if not mappings:
             return None
         expression_ids = sorted({int(item) for _, ids in mappings for item in ids})
+        # 先持久认领：并发/重启不重复加权；中途崩溃宁可漏一次弱反馈，不重放。
+        if not self._claim_event(session_id, event_key):
+            return None
 
         if is_reaction:
             outcome, index_updates = self._apply_count_delta(expression_ids, +1)
@@ -133,7 +148,20 @@ class ExpressionFeedbackService:
         con.execute("PRAGMA journal_mode=WAL")
         return con
 
-    def _lookup(self, target_ids: List[str]) -> List[tuple[str, List[int]]]:
+    def _claim_event(self, session_id: str, event_key: str) -> bool:
+        con = self._connect()
+        try:
+            with con:
+                con.execute("CREATE TABLE IF NOT EXISTS feedback_events (session_id TEXT, event_key TEXT, created_at REAL, PRIMARY KEY(session_id,event_key))")
+                con.execute("DELETE FROM feedback_events WHERE created_at < ?", (time.time() - _MAPPING_TTL_DAYS * 86400,))
+                return con.execute(
+                    "INSERT OR IGNORE INTO feedback_events VALUES(?,?,?)",
+                    (session_id, event_key, time.time()),
+                ).rowcount == 1
+        finally:
+            con.close()
+
+    def _lookup(self, target_ids: List[str], session_id: str) -> List[tuple[str, List[int]]]:
         cutoff = time.time() - _MAPPING_TTL_DAYS * 86400
         placeholders = ",".join("?" for _ in target_ids)
         con = self._connect()
@@ -146,8 +174,8 @@ class ExpressionFeedbackService:
                 )
                 rows = con.execute(
                     f"SELECT message_id, expression_ids FROM sent_map "
-                    f"WHERE message_id IN ({placeholders}) AND created_at >= ?",
-                    (*target_ids, cutoff),
+                    f"WHERE message_id IN ({placeholders}) AND session_id = ? AND created_at >= ?",
+                    (*target_ids, session_id, cutoff),
                 ).fetchall()
         finally:
             con.close()

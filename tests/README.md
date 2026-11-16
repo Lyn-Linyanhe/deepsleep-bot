@@ -1,31 +1,22 @@
-# tests
+# 测试
 
-7 组离线单元测试（共 **112 项**），验证记忆、回复安全与插件相关的关键逻辑。全部基于 **AST 提取源码函数后在内存里跑**：不联网、不写生产数据库、不调用模型。
+当前修复版入口为 `test_audit_repairs.py`，共 **19 项离线回归**。通过 AST 隔离加载实际源码函数，使用虚构消息、假接口与工作区临时 SQLite；不联网、不调用模型、不访问生产数据库。
 
-## 运行前提
+## 运行
 
-- 需要一个已部署的工作区：`MaiBot` 源码（v1.3.18 基线 + 已应用 `patches/0001-maibot-deepsleep-customizations.patch`）、本仓库三个插件已放入 `MaiBot/plugins/`
-- 用环境变量指向工作区根目录（其下应有 `MaiBot/`）
+需要已应用本仓库补丁的 MaiBot 与 MaiTrace，以及工作区根目录的 guardian.py、embedding_server/app.py。脚本会在工作区 out 下创建并清理测试临时目录。
 
-```bash
-# Windows
+```bat
 set DEEPSLEEP_WORKSPACE=D:\deepsleep
-python tests/test_speech_injector.py
-
-# Linux / macOS
-DEEPSLEEP_WORKSPACE=/path/to/deepsleep python tests/test_speech_injector.py
+python tests/test_audit_repairs.py
 ```
 
-## 测试清单
+覆盖身份快照与插件鉴权、静默历史、跨事件循环限流及取消、热调上限、配图返回结构、空间静默、记忆过滤与计数失败、反馈伪造与重放、guardian冷却、embedding真实并发模拟、单字打字速度。
 
-| 文件 | 项数 | 覆盖 |
-|---|---|---|
-| `test_counselor_tool.py` | 20 | 主题摘要加载、关键词打分、危机信号置顶、注入上限 |
-| `test_feedback.py` | 8 | 表达反馈闭环（被怼 −1 / 表情回应 +1） |
-| `test_memory_dedup.py` | 16 | 注入侧 bigram 近重复抑制、占位过滤防误杀、写侧占位拦截 |
-| `test_recency_decay.py` | 7 | 段落时效衰减：stamp 时序、score×factor 重排、平局稳定 |
-| `test_reply_tool_leak.py` | 6 | 工具协议文本泄露三阶段拦截 |
-| `test_speech_injector.py` | 44 | 提示卡匹配、会话分频、冷却、指定用户通道、Planner 注入 |
-| `test_today_usage.py` | 11 | 费用查询工具：鉴权、群过滤、金额口径、图片配额 |
+这些是隔离逻辑测试，不等同于完整 SDK、QQ 或模型集成测试。生产环境未安装 pytest，因此未运行完整上游测试套件。
 
-> 测试里的 QQ 号/群名均为占位或虚构值；主人 QQ 从被测源码的 `_OWNER_QQ` 常量读取，不硬编码。
+## 历史基线
+
+其余 `test_*.py` 是公开仓提交 `b0d07b8` 所保留的旧补丁测试，历史统计为7组112项。这些测试未随新接口全部迁移，不代表当前版本通过，也不要用目录通配运行来作为新版验收。
+
+其中 `test_feedback.py` 的旧夹具缺少真实消息身份及结构化通知；`test_memory_dedup.py` 仍要求已经移除的宽松 bigram 合并。这两组旧预期与安全修复不兼容，应参考新回归入口。其他历史测试本次也没有重新验收。

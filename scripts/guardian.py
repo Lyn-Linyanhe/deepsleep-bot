@@ -3,6 +3,7 @@
 # 停止：直接杀本进程（停止全部.bat 会按 *deepsleep* 路径杀掉它）；重启服务请用各自的启动脚本。
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import socket
@@ -100,15 +101,37 @@ def run_health_report() -> None:
         log(f"巡检执行失败: {exc}")
 
 
+def acquire_instance_lock():
+    """持有 Windows 命名互斥对象；PID 文件仅用于诊断。"""
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateMutexW(None, False, r"Local\deepsleep_guardian")
+    error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(error)
+    if error == 183:  # ERROR_ALREADY_EXISTS
+        kernel.CloseHandle(handle)
+        return None
+    return kernel, handle
+
+
 def main() -> None:
-    if os.path.exists(PIDFILE):
-        try:
-            old = int(open(PIDFILE, encoding="ascii").read().strip())
-            os.kill(old, 0)
-            log(f"已有守护进程在跑 (pid={old})，本实例退出")
-            return
-        except (ValueError, ProcessLookupError, PermissionError, OSError):
-            pass
+    lock = acquire_instance_lock()
+    if lock is None:
+        log("已有守护进程在跑，本实例退出")
+        return
+    try:
+        run_guardian()
+    finally:
+        lock[0].CloseHandle(lock[1])
+
+
+def run_guardian() -> None:
     with open(PIDFILE, "w", encoding="ascii") as f:
         f.write(str(os.getpid()))
 
@@ -140,8 +163,7 @@ def main() -> None:
             if now - last_relaunch_at[name] > GIVE_UP_SECONDS:
                 consecutive_relaunch[name] = 0
             if consecutive_relaunch[name] >= MAX_CONSECUTIVE_RELAUNCH:
-                log(f"CRITICAL: {name} 连续拉起 {consecutive_relaunch[name]} 次未恢复，暂停尝试 30 分钟")
-                last_relaunch_at[name] = now
+                log(f"CRITICAL: {name} 连续拉起 {consecutive_relaunch[name]} 次未恢复，等待冷却结束")
                 continue
             log(f"ACTION: 拉起 {name} (第 {consecutive_relaunch[name] + 1} 次)")
             launch(cfg["launch"])

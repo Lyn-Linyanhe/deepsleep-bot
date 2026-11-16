@@ -1,0 +1,289 @@
+diff --git a/services/feed_image.py b/services/feed_image.py
+index cc406c7..2ab3849 100644
+--- a/services/feed_image.py
++++ b/services/feed_image.py
+@@ -168,12 +168,17 @@ async def get_emoji_image(plugin, description: str) -> Optional[bytes]:
+         return None
+     if not result:
+         return None
+-    # 当前 SDK 返回表情对象或 None，图片位于 base64 字段。
++    # Host/SDK 返回带 success 的 envelope，图片在 emoji 对象内。
+     if not isinstance(result, dict):
+-        raise RuntimeError("表情包接口返回格式异常，预期为表情对象")
++        raise RuntimeError("表情包接口返回格式异常，预期为结果对象")
+     if result.get("success") is False:
+         raise RuntimeError(f"表情包查询失败: {result.get('error', '未知错误')}")
+-    b64 = result.get("base64", "")
++    emoji = result.get("emoji")
++    if emoji is None:
++        return None
++    if not isinstance(emoji, dict):
++        raise RuntimeError("表情包结果 emoji 不是对象")
++    b64 = emoji.get("base64", "")
+     if not b64:
+         return None
+     try:
+diff --git a/services/inject/planner_items.py b/services/inject/planner_items.py
+index e15e212..cefade7 100644
+--- a/services/inject/planner_items.py
++++ b/services/inject/planner_items.py
+@@ -250,7 +250,7 @@ class InjectionEngine:
+             lines.append(f"话题延续参考：{continuation_reason}")
+             guidance = "日程话题正在延续，可以自然带过当前活动。"
+         elif proactive:
+-            guidance = "可以在回答中自然带出此刻正在做的事，一两句即可，不要刻意转移话题。"
++            guidance = "生活背景是你自己的日常，不是聊天素材：对方没问起就不要主动提此刻在做什么；话题真的相关时也只是一句带过，不是汇报。"
+         else:
+             guidance = "背景仅供参考；不相关时完全忽略，不要刻意提及。"
+         result = (
+diff --git a/services/life/config.py b/services/life/config.py
+index 0a0f89f..e3e0dc2 100644
+--- a/services/life/config.py
++++ b/services/life/config.py
+@@ -233,6 +233,13 @@ class LifeSection(PluginConfigBase):
+         description='已到期且未占用生活素材的额外保留天数，范围 1–365，默认 30；不清理私人日记、梦境或结果待核对素材。',
+         json_schema_extra={'label': '素材保留天数', 'hint': '已到期且未占用生活素材的额外保留天数，范围 1–365，默认 30；不清理私人日记、梦境或结果待核对素材。', 'group': '生活素材', 'order': 10},
+     )
++    opportunity_min_ttl_minutes: int = Field(
++        default=300,
++        ge=30,
++        le=1440,
++        description='场景类生活素材的最短有效期，单位分钟，范围 30–1440，默认 300；实际有效期取「当前日程活动剩余时间」与本值中较大者，防止日程窗口太短导致素材快速过期。',
++        json_schema_extra={'label': '素材最短有效期（分钟）', 'hint': '场景类生活素材的最短有效期，单位分钟，范围 30–1440，默认 300；实际有效期取「当前日程活动剩余时间」与本值中较大者，防止日程窗口太短导致素材快速过期。', 'group': '生活素材', 'order': 12},
++    )
+ 
+     @model_validator(mode="after")
+     def validate_users(self) -> "LifeSection":
+diff --git a/services/life/engine.py b/services/life/engine.py
+index 973303d..646e135 100644
+--- a/services/life/engine.py
++++ b/services/life/engine.py
+@@ -172,6 +172,10 @@ class LifeEngine:
+             self._environment_cache = self.environment.snapshot()
+         return self.peek_state()
+ 
++    # 活动结束后契机还能保留多久。活动结束了不代表话题就凉了：
++    # 「刚才在图书馆」这种话晚一点说依然自然，留尾巴能提高被消费的概率。
++    OPPORTUNITY_GRACE_SECONDS = 4 * 3600
++
+     @staticmethod
+     def _activity_identity(current: Dict[str, Any], now: datetime) -> Tuple[str, float]:
+         if not current:
+@@ -192,7 +196,12 @@ class LifeEngine:
+             if end_minute <= start_minute:
+                 end_minute += 1440
+             expires_at = (base + timedelta(minutes=end_minute)).timestamp()
+-        return stable_id("activity", f"{start_day}:{text}:{current.get('name', '')}:{current.get('description', '')}"), expires_at
++        # 统一在活动结束点上留一段宽限。活动结束了不代表话题就凉了：
++        # 「刚才在图书馆」这种话晚一点说依然自然，留尾巴能提高被消费的概率。
++        return (
++            stable_id("activity", f"{start_day}:{text}:{current.get('name', '')}:{current.get('description', '')}"),
++            expires_at + LifeEngine.OPPORTUNITY_GRACE_SECONDS,
++        )
+ 
+     def peek_state(self) -> Dict[str, Any]:
+         """纯内存快照，不含私人日记、用户身份或原始群聊。"""
+@@ -335,12 +344,14 @@ class LifeEngine:
+                 topic = anonymous_text(required_text(response.get("topic"), "topic", 240), 240, forbidden)
+                 if not topic:
+                     raise ValueError("可分享场景缺少话题")
+-                _, expires_at = self._activity_identity(activity if isinstance(activity, dict) else {}, now)
++                _, activity_expires_at = self._activity_identity(activity if isinstance(activity, dict) else {}, now)
+                 completed_at = self.environment.now().timestamp()
+-                if expires_at > completed_at:
+-                    opportunity = {"source": "scene", "source_key": key, "topic": topic,
+-                        "motive": anonymous_text(response.get("motive", ""), 500, forbidden), "privacy": "public", "now": completed_at,
+-                        "expires_at": expires_at, "payload": {"scene": scene, "activity": anonymous_text(state["current_activity"], 500, forbidden)}}
++                # 契机有效期取「日程活动剩余时间」与配置的最短有效期中较大者：
++                # 日程窗口通常只有 30-90 分钟，只随活动过期会让发说说/主动私聊长期无素材可用。
++                expires_at = max(activity_expires_at, completed_at + self.plugin.config.life.opportunity_min_ttl_minutes * 60)
++                opportunity = {"source": "scene", "source_key": key, "topic": topic,
++                    "motive": anonymous_text(response.get("motive", ""), 500, forbidden), "privacy": "public", "now": completed_at,
++                    "expires_at": expires_at, "payload": {"scene": scene, "activity": anonymous_text(state["current_activity"], 500, forbidden)}}
+             # 场景与契机同事务保存；模型耗时后也只关联开始时的活动和原有有效期。
+             await self.store.put_scene(key, now.date().isoformat(), str(state["current_activity"]), scene,
+                                        now.timestamp(), opportunity=opportunity)
+@@ -430,6 +441,9 @@ class LifeEngine:
+                     await self.store.set_user_stream(user["user_id"], user["stream_id"], user["display_name"])
+                 claim = await self.store.claim_private(user, now.timestamp(), config.private_pending_seconds)
+                 if claim is None:
++                    # 没有可认领素材时补一份晨间问候素材（按天幂等，库内按 source_key 去重）；
++                    # 是否开口、怎么说仍由 Planner 决定，这里只提供"想说点什么"的由头。
++                    await self._seed_morning_greeting(user, now)
+                     continue
+                 token = str(claim["claim_token"])
+                 self._private_tasks[token] = {"claim_token": token, "session_id": user["stream_id"],
+@@ -454,6 +468,32 @@ class LifeEngine:
+                     raise
+             return False
+ 
++    async def _seed_morning_greeting(self, user: Dict[str, Any], now: datetime) -> None:
++        """晨间问候素材：上午窗口内认领不到素材时，按天为该用户补一份早安问候。
++
++        窗口锚定该用户免打扰结束时间（quiet_end）起 3 小时；素材按天以 source_key
++        幂等入库（stable_id 去重，INSERT OR IGNORE）。是否开口、怎么说仍由 Planner
++        决定，这里只提供"想说点什么"的由头。
++        """
++        try:
++            base_h, base_m = str(user["quiet_end"]).split(":")
++            base = int(base_h) * 60 + int(base_m)
++        except ValueError:
++            return
++        current = now.hour * 60 + now.minute
++        if not base <= current < base + 180:
++            return
++        display = str(user.get("display_name") or "").strip() or "TA"
++        key = f"morning-greeting-{user['user_id']}-{now.date().isoformat()}"
++        ts = now.timestamp()
++        await self.store.add_opportunity(
++            source="scene", source_key=key,
++            topic="早上醒来的早安问候",
++            motive=f"刚起床不久，想主动跟{display}说声早安，问问昨晚睡得好不好、今天有什么安排；语气像顺手发的消息，不要客套。",
++            privacy="target_only", target_user_id=str(user["user_id"]),
++            now=ts, expires_at=ts + 180 * 60, weight=0.7,
++        )
++
+     def pending_private_tasks(self, session_id: str) -> List[Dict[str, Any]]:
+         return [dict(item) for item in self._private_tasks.values() if item["session_id"] == session_id and item["status"] == "pending"]
+ 
+diff --git a/services/life/state.py b/services/life/state.py
+index 4ec0f06..61a3a5a 100644
+--- a/services/life/state.py
++++ b/services/life/state.py
+@@ -47,7 +47,12 @@ class LifeStateEngine:
+                                   "hours": duration, "activity": state.current_activity})
+             state.sleep_phase = "woken" if start < state.awake_grace_until else "awake"
+             load = {"work": 2.1, "study": 1.8, "travel": 1.4, "rest": 0.3, "meal": 0.5}.get(kind, 1.0)
+-            state.energy = _clamp(state.energy - load * hours, 0, 100)
++            if kind == "rest":
++                # 休息是唯一的清醒回血途径：原实现里 rest 也在扣精力，导致白天累到 0 后
++                # 永远回不来（主动私聊要求 energy>=30，于是整天不开口）。小睡按 3/小时回。
++                state.energy = _clamp(state.energy + 3.0 * hours, 0, 100)
++            else:
++                state.energy = _clamp(state.energy - load * hours, 0, 100)
+             state.hunger = _clamp(state.hunger + 5 * hours, 0, 100)
+             state.mood_arousal = _clamp(state.mood_arousal + 0.05 * hours, 0, 1)
+         mood_delta = (-0.03 if state.energy < 30 else 0.01 if state.energy > 70 else 0.0) * hours
+diff --git a/services/messaging/controller.py b/services/messaging/controller.py
+index 15ca844..438302f 100644
+--- a/services/messaging/controller.py
++++ b/services/messaging/controller.py
+@@ -124,18 +124,23 @@ class MessagingController:
+         return text if isinstance(text, str) and text else "\n".join(component_text(part) for part in walk_components(message.get("raw_message")) if component_kind(part) == "text")
+ 
+ 
++    def _is_sleeping(self) -> bool:
++        if not self.plugin.config.messaging.rest_gate_enabled or self.life is None:
++            return False
++        state = self.life.peek_state()
++        if not state.get("enabled") or float(state.get("awake_grace_until", 0)) > time.time():
++            return False
++        return state.get("sleep_phase") in {"falling_asleep", "light_sleep", "deep_sleep"} or (
++            state.get("activity_kind") == "sleep" and state.get("sleep_phase") == "woken"
++        )
++
+     def _rest_decision(self, text: str) -> Tuple[bool, bool]:
+         config = self.plugin.config.messaging
+-        if not config.rest_gate_enabled or self.life is None:
++        if not self._is_sleeping():
+             return True, False
+-        state = self.life.peek_state()
+-        if state.get("activity_kind") not in {"sleep", "rest"}:
+-            return True, False
+-        # 明确勿扰优先于概率和醒后宽限；命令在调用本方法前已独立放行。
++        # 明确勿扰优先于概率；清醒休息和醒后宽限不拦截。
+         if _QUIET.search(text):
+             return False, False
+-        if float(state.get("awake_grace_until", 0)) > time.time():
+-            return True, False
+         allow = bool(_WAKE.search(text)) or random.random() < config.wake_probability
+         return allow, allow
+ 
+@@ -188,7 +193,7 @@ class MessagingController:
+         text = self._text(message)
+         if message.get("is_command") or text.lstrip().startswith("/"):
+             return {"action": "continue"}
+-        if not known_private and not (group_id and self.plugin.config.messaging.recall_enabled):
++        if not known_private and not (group_id and self.plugin.config.messaging.recall_enabled) and not self._is_sleeping():
+             return {"action": "continue"}
+         if (session, message_id) in self._sources:
+             return {"action": "continue"}
+@@ -205,10 +210,19 @@ class MessagingController:
+                 text=text[:4000], display_name=display_name, platform=platform,
+             ))
+         allowed, wake = self._rest_decision(text) if known_private else (True, False)
++        if not known_private and self._is_sleeping():
++            wake = bool(_WAKE.search(text)) and not bool(_QUIET.search(text))
++            allowed = wake
+         turn.wake_candidate = wake
+         if not allowed:
+             turn.cancelled = True
+-            return {"action": "abort"}
++            updated_message = dict(message)
++            info = dict(message.get("message_info") or {})
++            additional = dict(info.get("additional_config") or {})
++            additional["store_without_reply"] = True
++            info["additional_config"] = additional
++            updated_message["message_info"] = info
++            return {"action": "continue", "modified_kwargs": {**kwargs, "message": updated_message}}
+         return {"action": "continue"}
+ 
+ 
+@@ -310,6 +324,11 @@ class MessagingController:
+         if turn is not None:
+             if turn.cancelled:
+                 return {"action": "abort"}
++        wake_reply = turn is not None and not turn.cancelled and turn.wake_candidate and not turn.wake_confirmed
++        # 只约束有会话锚点的聊天/主动回复；无来源的插件直发可能是日报或管理回包。
++        if message.get("platform") == "qq" and (anchor or binding is not None) and self._is_sleeping() and not wake_reply:
++            logger.info("睡眠发送门禁：暂不发送消息")
++            return {"action": "abort"}
+         if binding is not None:
+             if binding.blocked or (binding.generation and binding.generation != generation):
+                 return {"action": "abort"}
+diff --git a/services/routine.py b/services/routine.py
+index c656a2c..2de78b3 100644
+--- a/services/routine.py
++++ b/services/routine.py
+@@ -236,7 +236,7 @@ class RoutineRunner:
+         cfg = self.plugin.config.routine
+         cfg_monitor = self.plugin.config.monitor
+ 
+-        # 1. 静默时段（复用 monitor.silent_hours）
++        # 1. 静默时段同时约束自动发帖和浏览。
+         if cfg.respect_silent_hours and cfg_monitor.silent_hours:
+             is_silent, _, _ = is_in_silent_period(
+                 cfg_monitor.silent_hours,
+@@ -308,6 +308,15 @@ class RoutineRunner:
+         else:
+             format_hint = "只回答'是'或'否'，不要输出其他内容。第一个字符必须是'是'或'否'。"
+ 
++        # 发说说和刷空间的时间容忍度不同：深夜发点碎碎念很正常，
++        # 但半夜去翻别人动态、点赞评论就有点扰人了。
++        if action == "post":
++            night_rule = "- 深夜只影响'要不要发'的程度，不影响能不能发；有想说的话，深夜发反而更自然\n"
++            bias_rule = "倾向于分享：只要你有具体想说的内容，就可以回答'是'。\n\n"
++        else:
++            night_rule = "- 时间太深夜（22:00 后到次日 8:00）\n"
++            bias_rule = "绝大多数情况下应该回答'否'——能回答'否'就回答'否'。\n\n"
++
+         prompt = (
+             f"你是'{persona.personality}'。当前时间 {current_time}。\n"
+             f"{wrap_untrusted(activity.description, label='当前活动')}\n"
+@@ -316,14 +325,14 @@ class RoutineRunner:
+             "- 正在专注做事（工作 / 学习 / 会议 / 写代码 / 审阅）\n"
+             "- 正在用餐、洗澡、运动、化妆等需要专注或不方便看手机的活动\n"
+             "- 正在睡觉，或刚睡醒还没清醒\n"
+-            "- 时间太深夜（22:00 后到次日 8:00）\n"
++            f"{night_rule}"
+             "- 当前活动与'低头看手机/打字发消息'明显冲突\n"
+             "- 最近刚做过同类事（哪怕没明确告诉你）\n\n"
+             "【才可以的情况】\n"
+             "- 当前是放松 / 休息 / 闲逛 / 通勤 / 闲聊等碎片时间\n"
+             "- 时间是白天或晚上 8-10 点等正常社交活跃时段\n"
+             "- 你确实有想分享的内容或被好奇心驱动\n\n"
+-            "绝大多数情况下应该回答'否'——能回答'否'就回答'否'。\n\n"
++            f"{bias_rule}"
+             f"{format_hint}"
+         )
+         if opportunity is not None:

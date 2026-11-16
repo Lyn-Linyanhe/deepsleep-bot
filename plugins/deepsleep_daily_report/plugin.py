@@ -124,6 +124,7 @@ def _fmt_money(value: float) -> str:
 # 模型通道的人话翻译：MaiBot 里的名字是「渠道-用途」的内部编号。
 _MODEL_LABELS = {
     "free-chat": "聊天",
+    "workbuddy-chat": "聊天",
     "free-think": "深度思考",
     "free-vision": "识图",
     "geili-flex-chat": "聊天",
@@ -152,6 +153,7 @@ _CHANNEL_OF = {
     "luna": "luna·GPT",
     "codexpert": "codexpert（0.2×）",
     "tokendance": "tokendance（1×）",
+    "workbuddy": "聚合反代网关",
     "local-embed": "本地",
 }
 

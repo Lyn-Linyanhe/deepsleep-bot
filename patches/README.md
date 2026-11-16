@@ -1,31 +1,29 @@
-# patches
+# 补丁与基线
 
-相对 [MaiBot](https://github.com/Mai-with-u/MaiBot) 上游 **v1.3.18**（2026-10）的源码改动，导出为单个补丁：
+`0001-maibot-deepsleep-customizations.patch` 是相对 MaiBot **v1.3.18** 的累计源码补丁，包含原有定制及 2026-11-17 审计修复，不是叠加在旧版 0001 上的增量补丁。
 
-```bash
-git apply patches/0001-maibot-deepsleep-customizations.patch
-```
-
-- 基线：`v1.3.18` 标签（本地 `git describe` 为 `v1.3.18-1-gb94a3e72a`，含一个本地定制提交）
-- 规模：**28 个文件，+874 / -37 行**
-- 新文件（未被上游跟踪）需手动放置：
+在干净的 MaiBot v1.3.18 工作树中：
 
 ```bash
-cp patches/new-files/src/learners/expression_feedback.py  MaiBot/src/learners/
+git apply --check /path/to/deepsleep-bot/patches/0001-maibot-deepsleep-customizations.patch
+git apply /path/to/deepsleep-bot/patches/0001-maibot-deepsleep-customizations.patch
 ```
 
-第三方插件 `snowluma_adapter` 的两处修改见 `notes-snowluma-adapter.md`（无法生成 patch，仅文字记录）。
+再将 `new-files/src/learners/expression_feedback.py` 放到 `MaiBot/src/learners/`。
 
-## 覆盖内容
+`0002-maitrace-audit-fixes.patch` 单独应用于 MaiTrace **v6.2.4 / commit 4705c253706c5a936633db905fff6580ade3ba74**，在 MaiTrace 仓库根目录执行 `git apply --check` 后应用。它包含生活状态、睡眠消息保留、发送门禁、空间配图与静默的本地改动；必须同时使用上述 MaiBot 补丁，`store_without_reply` 宿主契约不能单独部署。
 
-| 领域 | 文件 |
-|---|---|
-| 记忆注入 | `maisaka/memory/heuristic_injector.py`、`person_profile.py`、`image_injector.py` |
-| 检索与衰减 | `A_memorix/core/retrieval/dual_path.py`、`utils/search_execution_service.py`、`runtime/services/memory_search_service.py`、`storage/metadata_store.py` |
-| 写入侧 | `A_memorix/core/utils/summary_importer.py`、`person_profile_service.py` |
-| 模型链与配置 | `config/model_configs.py`、`config/official_configs.py`、`services/memory_flow_service.py`、`llm_models/utils_model.py` |
-| 表达学习 | `learners/jargon_miner.py`、`learners/expression_feedback.py`（新）、`chat/replyer/maisaka_expression_selector.py` |
-| 回复安全 | `maisaka/builtin_tool/reply.py` |
-| 插件运行时 | `plugin_runtime/component_query.py` |
+MaiTrace 补丁遵循上游 **AGPL-3.0-only**，许可全文见 `LICENSE-MaiTrace-AGPL-3.0.txt`；上游既有 MIT 组件声明应随上游完整分发保留。MaiBot 累计补丁遵循其 GPL-3.0 许可。
 
-补丁基于 MaiBot v1.3.18 时代的代码，升级上游时可能需要 rebase。
+所有真实账号已替换为占位符；请在本地配置权限前核对账号，不要照搬占位账号。第三方适配器的其他定制见 `notes-snowluma-adapter.md`。
+
+## 本次修复
+
+- 当前真实消息批次的调用者鉴权；插件身份覆盖保护。
+- 静默消息保留及醒后历史恢复；部分发送成功状态保护。
+- 跨事件循环模型限流、热更新存量计数与取消释放。
+- 段落最终返回后计数、摘要去重选用就绪段落池。
+- 保守占位过滤、不同事实不按 bigram 合并、私聊摘要隔离。
+- 表达反馈结构化通知校验、会话绑定与重复反馈抑制。
+
+验证和限制见 `../docs/audit-update-20261117.md`。升级上游时需重新核对应用位置和接口，不保证跨版本直接应用。

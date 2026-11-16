@@ -106,16 +106,16 @@ flowchart TB
 
 ## 测试
 
-`tests/` 里有 7 组离线单元测试（共 112 项）：AST 提取源码函数在内存里跑，不联网、不写库、不调模型。运行方式见 [tests/README.md](tests/README.md)。
+当前审计修复回归为 `tests/test_audit_repairs.py`，19 项离线检查（源码函数隔离执行、假消息与临时数据库，不访问生产数据库、不联网）。运行方式见 [tests/README.md](tests/README.md)。原有 7 组、112 项测试属于旧补丁快照，不能当作当前版本全部通过的证明。
 
 ```bash
 set DEEPSLEEP_WORKSPACE=D:\deepsleep
-python tests/test_speech_injector.py
+python tests/test_audit_repairs.py
 ```
 
 ## 相对 MaiBot 上游的改动
 
-基线 **MaiBot v1.3.18（2026-10）**，28 个文件、约 870 行改动（见 `patches/0001-maibot-deepsleep-customizations.patch`）。
+基线 **MaiBot v1.3.18（2026-10）**，累计补丁见 `patches/0001-maibot-deepsleep-customizations.patch`。2026-11-17 同步两批审计修复；MaiTrace 的独立补丁及固定基线见 [patches/README.md](patches/README.md)。修复范围与尚未解决的边界见 [审计更新](docs/audit-update-20261117.md)。
 
 - **记忆系统**：注入侧占位/近重复过滤与跨会话配额、检索遥测、段落时效衰减（24h 半衰期，取访问前快照避免结构性空转）、写侧占位总结拦截、画像与事实写回的模型链拆分
 - **表达学习**：快模式语境加权、反馈闭环（被怼 -1 / 表情回应 +1）、黑话毕业线调整
@@ -128,7 +128,8 @@ python tests/test_speech_injector.py
 
 - 摘要触发自适应（攒满 60 条或 15 条且距上次 ≥6h），冷群不断更
 - 段落召回时效衰减：24h 半衰期、下限 0.15、只在排序层生效不破召回集
-- 注入去重：字符 bigram 近重复抑制 + 占位说明过滤（≤120 字且特征词 ≥2）
+- 注入去重：只合并去空白后相同文本，保留不同主体和否定事实；占位过滤仅匹配明确的完整空增量裁决
+- 访问计数：候选阶段只算时效，最终 SDK 返回后计数；私聊摘要自动注入限制在原会话
 - 检索遥测：`记忆检索遥测: mode= hits= duration_ms=`，无查询正文
 - 查询蒸馏：用摘要式查询替代原始消息拼接，hit@5 从 22.5% → 97.5%
 
@@ -160,7 +161,7 @@ python tests/test_speech_injector.py
 
 ## 许可
 
-- 本仓库代码为 **GPL-3.0**（继承 MaiBot 上游许可）
+- MaiBot 相关补丁与自建插件为 **GPL-3.0**；MaiTrace 补丁单独遵循 **AGPL-3.0-only**（见 NOTICE 与补丁目录许可）
 - 「狗头军师」知识库（PolyForm Noncommercial 1.0.0）的衍生内容**未随仓库发布**
 - SnowLuma 聊天网关及 MaiBot 框架本身不包含在本仓库，请从各自上游获取
 

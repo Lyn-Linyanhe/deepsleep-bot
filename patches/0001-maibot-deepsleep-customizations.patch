@@ -88,14 +88,14 @@ index 7202fe733..31b21896d 100644
          with self.metadata_store.transaction(immediate=True) as database:
              asset = self.metadata_store.upsert_image_asset(
 diff --git a/src/A_memorix/core/retrieval/dual_path.py b/src/A_memorix/core/retrieval/dual_path.py
-index b5446b12d..a48b16d41 100644
+index b5446b12d..3f2269817 100644
 --- a/src/A_memorix/core/retrieval/dual_path.py
 +++ b/src/A_memorix/core/retrieval/dual_path.py
 @@ -420,6 +420,7 @@ class DualPathRetriever:
          temporal: Optional[TemporalQueryOptions] = None,
          enable_ppr: Optional[bool] = None,
          scope: Optional[RetrievalScope] = None,
-+        record_access: bool = True,
++        record_access: bool = False,
      ) -> List[RetrievalResult]:
          """
          执行检索（异步方法）
@@ -119,7 +119,7 @@ index b5446b12d..a48b16d41 100644
 +        # 这个预计算值。若在 stamping 之后才算，所有候选的锚点都等于"现在"，
 +        # 因子恒为 1，衰减永远空转。下限 0.15 对齐关系生命周期的 revive 阈值：
 +        # 老记忆不会被打到零，被再次召回即复活。失败只记日志。
-+        if results and record_access:
++        if results:
 +            try:
 +                await asyncio.to_thread(self._stamp_paragraph_recency_factors, results)
 +            except Exception as exc:
@@ -191,17 +191,18 @@ index b5446b12d..a48b16d41 100644
          q = str(query or "").strip()
          if not q:
 diff --git a/src/A_memorix/core/runtime/services/memory_search_service.py b/src/A_memorix/core/runtime/services/memory_search_service.py
-index d1521febc..36fad0005 100644
+index d1521febc..261c1e1bf 100644
 --- a/src/A_memorix/core/runtime/services/memory_search_service.py
 +++ b/src/A_memorix/core/runtime/services/memory_search_service.py
-@@ -1,5 +1,6 @@
+@@ -1,5 +1,7 @@
  from __future__ import annotations
  
++import asyncio
 +import time
  from typing import Any, Dict, List, Optional, Sequence
  
  from src.A_memorix.core.retrieval import RetrievalScope
-@@ -8,10 +9,13 @@ from src.A_memorix.core.utils.search_execution_service import (
+@@ -8,10 +10,13 @@ from src.A_memorix.core.utils.search_execution_service import (
      SearchExecutionResult,
      SearchExecutionService,
  )
@@ -215,7 +216,7 @@ index d1521febc..36fad0005 100644
  
  class MemorySearchService(KernelServiceBase):
      """统一 SDK 检索入口，并在返回前收敛聊天范围和可见性规则。"""
-@@ -35,6 +39,7 @@ class MemorySearchService(KernelServiceBase):
+@@ -35,6 +40,7 @@ class MemorySearchService(KernelServiceBase):
          assert self.retriever is not None
          assert self.episode_retriever is not None
          assert self.aggregate_query_service is not None
@@ -223,7 +224,7 @@ index d1521febc..36fad0005 100644
  
          mode = str(request.mode or "search").strip().lower() or "search"
          query = str(request.query or "").strip()
-@@ -76,7 +81,7 @@ class MemorySearchService(KernelServiceBase):
+@@ -76,7 +82,7 @@ class MemorySearchService(KernelServiceBase):
                      current_user_id=request.user_id,
                  )
              hits = hits[:limit]
@@ -232,7 +233,7 @@ index d1521febc..36fad0005 100644
  
          if mode == "aggregate":
              payload = await self.aggregate_query_service.execute(
-@@ -104,7 +109,7 @@ class MemorySearchService(KernelServiceBase):
+@@ -104,7 +110,7 @@ class MemorySearchService(KernelServiceBase):
                      current_user_id=request.user_id,
                  )
              filtered = filtered[:limit]
@@ -241,7 +242,7 @@ index d1521febc..36fad0005 100644
  
          query_type = mode
          runtime_config = self._build_runtime_config()
-@@ -137,7 +142,16 @@ class MemorySearchService(KernelServiceBase):
+@@ -137,11 +143,32 @@ class MemorySearchService(KernelServiceBase):
                  current_user_id=request.user_id,
              )
          filtered = filtered[:limit]
@@ -258,7 +259,24 @@ index d1521febc..36fad0005 100644
 +        return await self._finalize_search_response(hits)
  
      async def _finalize_search_response(self, hits: List[Dict[str, Any]]) -> Dict[str, Any]:
-         """只为最终返回且实际采用的关系命中提交一次 ACCESS。"""
+-        """只为最终返回且实际采用的关系命中提交一次 ACCESS。"""
++        """只对过滤、限额处理后返回的命中计数，关系保留生命周期强化语义。"""
+ 
++        paragraph_hashes = list(dict.fromkeys(
++            str(item.get("hash", "") or "").strip() for item in hits
++            if item.get("type") == "paragraph" and item.get("hash")
++        ))
++        if paragraph_hashes and self.metadata_store is not None:
++            def record_paragraphs() -> None:
++                for hash_value in paragraph_hashes:
++                    try:
++                        self.metadata_store.record_access(hash_value, "paragraph")
++                    except Exception:
++                        logger.warning("最终段落访问计数失败，保留检索结果", exc_info=True)
++            await asyncio.to_thread(record_paragraphs)
+         relation_hashes: List[str] = []
+         seen: set[str] = set()
+         for item in hits:
 diff --git a/src/A_memorix/core/storage/metadata_store.py b/src/A_memorix/core/storage/metadata_store.py
 index d978d14fd..67d659ccb 100644
 --- a/src/A_memorix/core/storage/metadata_store.py
@@ -291,7 +309,7 @@ index edf86485b..491f775ef 100644
                  logger.warning(f"向量证据召回失败: alias={alias}, err={e}")
                  continue
 diff --git a/src/A_memorix/core/utils/search_execution_service.py b/src/A_memorix/core/utils/search_execution_service.py
-index 9820249df..969bffe14 100644
+index 9820249df..d47142a0e 100644
 --- a/src/A_memorix/core/utils/search_execution_service.py
 +++ b/src/A_memorix/core/utils/search_execution_service.py
 @@ -25,6 +25,32 @@ from .time_parser import parse_query_time_range
@@ -327,7 +345,15 @@ index 9820249df..969bffe14 100644
  def _get_config_value(config: Optional[dict], key: str, default: Any = None) -> Any:
      if not isinstance(config, dict):
          return default
-@@ -386,6 +412,18 @@ class SearchExecutionService:
+@@ -317,6 +343,7 @@ class SearchExecutionService:
+                 "top_k": candidate_top_k,
+                 "temporal": temporal,
+                 "enable_ppr": bool(request.enable_ppr),
++                "record_access": False,
+             }
+             if request.scope is not None:
+                 retrieve_kwargs["scope"] = request.scope
+@@ -386,6 +413,18 @@ class SearchExecutionService:
                  if removed_count > 0:
                      logger.info(f"metric.safe_dedup_removed_count={removed_count} caller={request.caller}")
  
@@ -347,10 +373,10 @@ index 9820249df..969bffe14 100644
              return {"results": retrieved, "elapsed_ms": elapsed_ms}
  
 diff --git a/src/A_memorix/core/utils/summary_importer.py b/src/A_memorix/core/utils/summary_importer.py
-index f05e3a3c0..620646dd0 100644
+index f05e3a3c0..8418eb7c6 100644
 --- a/src/A_memorix/core/utils/summary_importer.py
 +++ b/src/A_memorix/core/utils/summary_importer.py
-@@ -152,6 +152,26 @@ def _message_timestamp(message: Any) -> Optional[float]:
+@@ -152,6 +152,30 @@ def _message_timestamp(message: Any) -> Optional[float]:
      return None
  
  
@@ -369,21 +395,39 @@ index f05e3a3c0..620646dd0 100644
 +    content = str(text or "").strip()
 +    if not content or len(content) > _PLACEHOLDER_SUMMARY_MAX_CHARS:
 +        return False
-+    phrase_hits = len(_PLACEHOLDER_SUMMARY_PATTERN.findall(content))
-+    verdict_start = content.startswith(_PLACEHOLDER_VERDICT_STARTS)
-+    return phrase_hits >= 2 or (verdict_start and phrase_hits >= 1)
++    # 只有完整空增量裁决才可跳过，混有其他事实时保留。
++    return bool(re.fullmatch(
++        r"(?:(?:本轮|本段|本次)(?:对话|聊天|总结)?[，,:： ]*)?"
++        r"(?:没有新增|无新增|未发现新的|没有可保留的|无可保留的)"
++        r"(?:长期记忆|长期事实|稳定事实|可保留信息|信息|事实|记忆)[。.!！\s]*",
++        content,
++    ))
 +
 +
  def _paragraph_created_at(paragraph: Dict[str, Any]) -> float:
      try:
          return float(paragraph.get("summary_observed_at", paragraph.get("created_at")) or 0.0)
-@@ -890,6 +910,24 @@ class SummaryImporter:
+@@ -278,6 +302,13 @@ class SummaryImporter:
+             return configured_mode == "dual"
+         return False
+ 
++    def _paragraph_vector_store(self) -> VectorStore:
++        if self._dual_vector_pools_enabled() and isinstance(self.plugin_config, dict):
++            store = self.plugin_config.get("paragraph_vector_store")
++            if store is not None:
++                return store
++        return self.vector_store
++
+     def _graph_vector_store(self) -> VectorStore:
+         if self._dual_vector_pools_enabled() and isinstance(self.plugin_config, dict):
+             store = self.plugin_config.get("graph_vector_store")
+@@ -890,6 +921,24 @@ class SummaryImporter:
                      source=f"chat_summary:{stream_id}",
                      skipped=True,
                  )
 +            # 占位裁决拦截：模型没返回空串，而是用一句话说明「本轮无增量」。
 +            # 这类文本没有记忆价值，入库后还会被检索反复召回（见 2026-11-12 审计）。
-+            if not facts and _is_placeholder_summary(summary_text):
++            if not facts and not entities and not relations and _is_placeholder_summary(summary_text):
 +                logger.info(f"总结为占位说明，跳过段落写入: chat={stream_id} text={summary_text[:60]!r}")
 +                external_id = str((metadata or {}).get("external_id") or "").strip()
 +                if external_id:
@@ -402,8 +446,17 @@ index f05e3a3c0..620646dd0 100644
              # 人物归属由程序给出的标记和 ID 确定；名称只在写入前按持久映射恢复。
              identity_metadata = identity_context.metadata(
                  [summary_text, *entities, *(value for relation in relations for value in relation.values()),
+@@ -932,7 +981,7 @@ class SummaryImporter:
+                 )
+                 if not str(metadata.get("external_id") or "").strip():
+                     metadata["external_id"] = f"summary:{source['observation_id']}"
+-                dedup = FactDeduplicator(self.metadata_store, self.embedding_manager, self.vector_store, task_name_to_use)
++                dedup = FactDeduplicator(self.metadata_store, self.embedding_manager, self._paragraph_vector_store(), task_name_to_use)
+                 plan = await dedup.plan(scope_type="chat", scope_id=stream_id, facts=facts,
+                                         source=source, relations=relations)
+                 payload = {"plan": plan, "metadata": metadata, "entities": entities, "relations": relations,
 diff --git a/src/agent/provider.py b/src/agent/provider.py
-index 5624bc6db..945f62329 100644
+index 5624bc6db..d2b84aacd 100644
 --- a/src/agent/provider.py
 +++ b/src/agent/provider.py
 @@ -13,6 +13,12 @@ from .service import AgentService, agent_service
@@ -423,7 +476,7 @@ index 5624bc6db..945f62329 100644
          if not self.service.config.enabled:
              return []
          trusted = context is not None and context.session_id == self.service.agent_id
-+        owner_account = context is not None and str(context.user_id or "").strip() in OWNER_QQ_IDS
++        owner_account = context is not None and context.platform == "qq" and str(context.user_id or "").strip() in OWNER_QQ_IDS
          tools = []
          for spec in tool_specs():
              if not trusted and spec.name not in CHAT_TOOLS:
@@ -434,25 +487,50 @@ index 5624bc6db..945f62329 100644
              if trusted:
                  spec.metadata["visibility"] = "visible"
              tools.append(spec)
-@@ -62,6 +72,18 @@ class AgentToolProvider:
+@@ -62,6 +72,12 @@ class AgentToolProvider:
              name, args = invocation.tool_name, invocation.arguments
              if name not in CHAT_TOOLS:
                  self.service.require_owner(context.session_id)
-+            # agent_talk 只认主人账号（私聊或群聊均可）。判定依据由上下文给出的
-+            # speaker_ids（本批出现的发言者）决定：只要其中包含主人，就允许。
-+            # 非主人返回可读的工具结果，不抛异常——异常会被下面的 OSError 分支吞成 traceback。
++            # 只认 Host 固定的本轮唯一调用者，历史参与者不能提供授权。
 +            if name == "agent_talk" and context.session_id != self.service.agent_id:
-+                speakers = context.metadata.get("speaker_ids") if context.metadata else None
-+                if isinstance(speakers, (list, tuple, set)) and speakers:
-+                    allowed = any(str(s).strip() in OWNER_QQ_IDS for s in speakers)
-+                else:
-+                    allowed = str(context.user_id or "").strip() in OWNER_QQ_IDS
++                allowed = context.platform == "qq" and str(context.user_id or "").strip() in OWNER_QQ_IDS
 +                if not allowed:
 +                    msg = "agent 功能只对主人开放；当前说话的人不是主人，不能使用。"
 +                    return ToolExecutionResult(tool_name=name, success=False, error_message=msg, content=msg)
              result: Dict[str, Any]
              if name == "agent_talk":
                  result = await messaging.tell(self.service, context.session_id, args["text"], args.get("target", ""), args.get("images", []))
+diff --git a/src/chat/heart_flow/heartflow_message_processor.py b/src/chat/heart_flow/heartflow_message_processor.py
+index 7966c1c54..e845d4453 100644
+--- a/src/chat/heart_flow/heartflow_message_processor.py
++++ b/src/chat/heart_flow/heartflow_message_processor.py
+@@ -51,13 +51,22 @@ class HeartFCMessageReceiver:
+             # message.is_mentioned = is_mentioned
+             # message.is_at = is_at
+ 
++            # 休息门禁只影响本轮唤醒，消息仍入库供醒来后的上下文使用。
++            additional = message.message_info.additional_config or {}
++            store_only = additional.get("store_without_reply") is True
+             chat = None
+-            try:
+-                chat = await heartflow_manager.get_or_create_heartflow_chat(message.session_id)
+-            except Exception as e:
+-                logger.error(f"出现错误: {e}")
++            if not store_only:
++                try:
++                    chat = await heartflow_manager.get_or_create_heartflow_chat(message.session_id)
++                except Exception as e:
++                    logger.error(f"出现错误: {e}")
+ 
+             await MessageUtils.store_message_to_db_async(message)  # 存储消息到数据库
++            if store_only:
++                existing = heartflow_manager.heartflow_chat_list.get(message.session_id)
++                if existing is not None:
++                    await existing.register_silent_message(message)
++                logger.info("休息门禁：消息已保存，本轮不唤醒回复")
+             if chat is not None:
+                 await chat.register_message(message)
+             from src.services.memory_flow_service import memory_automation_service
 diff --git a/src/chat/replyer/maisaka_expression_selector.py b/src/chat/replyer/maisaka_expression_selector.py
 index 88421df17..628315413 100644
 --- a/src/chat/replyer/maisaka_expression_selector.py
@@ -557,6 +635,64 @@ index 88421df17..628315413 100644
          if self._use_vector_candidate_pool() and self._has_embedding_model_configured():
              expression_query_text = self._build_expression_query_text(
                  reply_reason,
+diff --git a/src/chat/utils/utils.py b/src/chat/utils/utils.py
+index ec81624c8..6ca56a0c6 100644
+--- a/src/chat/utils/utils.py
++++ b/src/chat/utils/utils.py
+@@ -694,6 +694,15 @@ def process_llm_response(text: str, enable_splitter: bool = True, enable_chinese
+     ]
+ 
+ 
++def _typing_jitter() -> float:
++    """打字时间的拟人抖动：0.75–1.35 均匀因子，模拟真人手速波动。
++
++    逐条消息独立抽取，同一次回复拆出的多条气泡节奏也会参差；
++    typing_speed<=0（关闭延迟）的路径不受影响。
++    """
++    return random.uniform(0.75, 1.35)
++
++
+ def calculate_typing_time(
+     input_string: str,
+     # thinking_start_time: float,
+@@ -715,14 +724,15 @@ def calculate_typing_time(
+     - 在所有输入结束后，额外加上回车时间0.3秒
+     - 如果is_emoji或is_image为True，将使用固定1秒的输入时间，再应用打字速度配置
+     """
+-    # chinese_time *= 1 / typing_speed_multiplier
+-    # english_time *= 1 / typing_speed_multiplier
++    typing_speed = global_config.response_post_process.typing_speed
++    if typing_speed <= 0:
++        return 0
+     # 计算中文字符数
+     chinese_chars = sum("\u4e00" <= char <= "\u9fff" for char in input_string)
+ 
+     # 如果只有一个中文字符，使用3倍时间
+     if not (is_emoji or is_image) and chinese_chars == 1 and len(input_string.strip()) == 1:
+-        return chinese_time * 3 + 0.3  # 加上回车时间
++        return (chinese_time * 3 + 0.3) * typing_speed * _typing_jitter()  # 加上回车时间
+ 
+     # 正常计算所有字符的输入时间
+     total_time = 0.0
+@@ -731,9 +741,6 @@ def calculate_typing_time(
+     if is_emoji or is_image:
+         total_time = 1
+ 
+-    typing_speed = global_config.response_post_process.typing_speed
+-    if typing_speed <= 0:
+-        return 0
+     total_time *= typing_speed
+ 
+     # if time.time() - thinking_start_time > 10:
+@@ -744,7 +751,7 @@ def calculate_typing_time(
+     # print(f"nowtime - thinking_start_time:{time.time() - thinking_start_time}")
+     # print(f"{total_time}")
+ 
+-    return total_time  # 加上回车时间
++    return total_time * _typing_jitter()  # 加上回车时间；抖动见 _typing_jitter
+ 
+ 
+ def truncate_message(message: str, max_length=20) -> str:
 diff --git a/src/config/model_configs.py b/src/config/model_configs.py
 index 3671063a4..7ef088f11 100644
 --- a/src/config/model_configs.py
@@ -642,52 +778,64 @@ index 95643380a..2fd180dbc 100644
          finalize_result = await self._get_runtime_manager().invoke_hook(
              "jargon.inference.before_finalize",
 diff --git a/src/llm_models/utils_model.py b/src/llm_models/utils_model.py
-index 55db99831..a686fd60d 100644
+index 55db99831..6b38b76ea 100644
 --- a/src/llm_models/utils_model.py
 +++ b/src/llm_models/utils_model.py
-@@ -71,6 +71,24 @@ install(extra_lines=3)
+@@ -1,3 +1,4 @@
++from contextlib import asynccontextmanager
+ from dataclasses import dataclass
+ from datetime import datetime
+ from enum import Enum
+@@ -9,6 +10,7 @@ import inspect
+ import json
+ import random
+ import re
++import threading
+ import time
+ import traceback
+ import uuid
+@@ -71,6 +73,31 @@ install(extra_lines=3)
  
  logger = get_logger("llm_models")
  
-+_PROVIDER_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
-+_PROVIDER_SEMAPHORE_LIMITS: dict[str, int] = {}
-+_PROVIDER_SEMAPHORE_LOCK = asyncio.Lock()
++_PROVIDER_ACTIVE: dict[str, int] = {}
++_PROVIDER_SLOT_LOCK = threading.Lock()
 +
 +
-+async def _get_provider_semaphore(api_provider: APIProvider) -> asyncio.Semaphore | None:
-+    """Return the optional provider-wide request limiter."""
-+    limit = max(0, int(getattr(api_provider, "max_concurrent", 0) or 0))
-+    if limit <= 0:
-+        return None
++@asynccontextmanager
++async def _provider_slot(api_provider: APIProvider):
++    """进程级并发名额：跨事件循环共享，热更新不丢弃存量计数。"""
 +    name = str(api_provider.name or api_provider.base_url or "provider").strip()
-+    async with _PROVIDER_SEMAPHORE_LOCK:
-+        if _PROVIDER_SEMAPHORE_LIMITS.get(name) != limit:
-+            _PROVIDER_SEMAPHORES[name] = asyncio.Semaphore(limit)
-+            _PROVIDER_SEMAPHORE_LIMITS[name] = limit
-+        return _PROVIDER_SEMAPHORES[name]
++    while True:
++        # 每次排队检查读取最新配置，旧请求不能覆盖新上限。
++        current = next((p for p in config_manager.get_model_config().api_providers if p.name == api_provider.name), api_provider)
++        limit = max(0, int(current.max_concurrent or 0))
++        with _PROVIDER_SLOT_LOCK:
++            active = _PROVIDER_ACTIVE.get(name, 0)
++            if limit == 0 or active < limit:
++                _PROVIDER_ACTIVE[name] = active + 1
++                break
++        await asyncio.sleep(0.05)
++    try:
++        yield
++    finally:
++        with _PROVIDER_SLOT_LOCK:
++            _PROVIDER_ACTIVE[name] -= 1
 +
 +
  DATA_URI_LIMIT_PATTERN = re.compile(
      r"Exceeded limit on max bytes per data-uri item\s*:\s*(?P<limit>\d+)",
      re.IGNORECASE,
-@@ -1307,11 +1325,20 @@ class LLMOrchestrator:
-         全部模型都触发 hard_timeout 时，最后一个 LLMTaskTimeoutError 上抛给调用方。
+@@ -1308,10 +1335,12 @@ class LLMOrchestrator:
          """
          timeout_s = self.model_for_task.hard_timeout
-+        semaphore = await _get_provider_semaphore(api_provider)
          try:
 -            return await asyncio.wait_for(
 -                self._attempt_request_on_model(api_provider, client, request=request),
 -                timeout=timeout_s,
 -            )
-+            if semaphore is None:
-+                return await asyncio.wait_for(
-+                    self._attempt_request_on_model(api_provider, client, request=request),
-+                    timeout=timeout_s,
-+                )
-+
 +            async def _attempt_with_slot() -> APIResponse:
-+                async with semaphore:
++                async with _provider_slot(api_provider):
 +                    return await self._attempt_request_on_model(api_provider, client, request=request)
 +
 +            # 等并发位和请求本体共享 hard_timeout 预算：满载排队到点即切下一模型，不无限滞留
@@ -720,7 +868,7 @@ index c5842ce42..12561cd0f 100644
      BuiltinToolEntry("subagent", get_subagent_tool_spec, handle_subagent_tool, stage="action"),
      BuiltinToolEntry("subagent_status", get_subagent_status_tool_spec, handle_subagent_status_tool, stage="action"),
 diff --git a/src/maisaka/builtin_tool/reply.py b/src/maisaka/builtin_tool/reply.py
-index b9551f8ca..1a5b56d14 100644
+index b9551f8ca..690a342de 100644
 --- a/src/maisaka/builtin_tool/reply.py
 +++ b/src/maisaka/builtin_tool/reply.py
 @@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Tupl
@@ -812,7 +960,16 @@ index b9551f8ca..1a5b56d14 100644
      reply_result.completion.response_text = combined_reply_text
      reply_result.text_fragments = reply_segments
      reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
-@@ -762,6 +795,18 @@ async def execute_reply(
+@@ -727,6 +760,8 @@ async def execute_reply(
+                         )
+                     )
+                     break
++                # 首段确认送达后立即保护本回合，后续段落失败不能撤销已发送事实。
++                tool_ctx.runtime._turn_reply_sent = True
+                 sent_message_id = sent_message.message_id.strip()
+                 if sent_message_id:
+                     sent_message_ids.append(sent_message_id)
+@@ -762,6 +797,18 @@ async def execute_reply(
              metadata=reply_metadata,
          )
  
@@ -1091,7 +1248,7 @@ index 9232f42c2..ae1b086d0 100644
          seconds=wait_seconds,
          tool_call_id=invocation.call_id,
 diff --git a/src/maisaka/memory/heuristic_injector.py b/src/maisaka/memory/heuristic_injector.py
-index be09f93a8..26854a877 100644
+index be09f93a8..54177a0f8 100644
 --- a/src/maisaka/memory/heuristic_injector.py
 +++ b/src/maisaka/memory/heuristic_injector.py
 @@ -5,6 +5,7 @@ from __future__ import annotations
@@ -1102,7 +1259,7 @@ index be09f93a8..26854a877 100644
  
  from src.chat.message_receive.chat_manager import BotChatSession, chat_manager
  from src.chat.message_receive.message import SessionMessage
-@@ -23,6 +24,47 @@ HEURISTIC_MEMORY_REFERENCE_MARKER = "【启发式记忆-内部参考】"
+@@ -23,6 +24,49 @@ HEURISTIC_MEMORY_REFERENCE_MARKER = "【启发式记忆-内部参考】"
  _SOURCE_CHAT_SUMMARY_PREFIX = "chat_summary:"
  _SOURCE_PERSON_FACT_PREFIX = "person_fact:"
  
@@ -1134,23 +1291,25 @@ index be09f93a8..26854a877 100644
 +    content = str(text or "").strip()
 +    if not content or len(content) > _PLACEHOLDER_MAX_CHARS:
 +        return False
-+    phrase_hits = len(_PLACEHOLDER_PATTERN.findall(content))
-+    verdict_start = content.startswith(_PLACEHOLDER_VERDICT_STARTS)
-+    return phrase_hits >= 2 or (verdict_start and phrase_hits >= 1)
++    # 仅接受完整的空增量裁决；含其他事实的混合文本必须保留。
++    return bool(re.fullmatch(
++        r"(?:(?:本轮|本段|本次)(?:对话|聊天|总结)?[，,:： ]*)?"
++        r"(?:没有新增|无新增|未发现新的|没有可保留的|无可保留的)"
++        r"(?:长期记忆|长期事实|稳定事实|可保留信息|信息|事实|记忆)[。.!！\s]*",
++        content,
++    ))
 +
 +
 +def _is_near_duplicate(left: str, right: str) -> bool:
-+    left_bigrams = _text_bigrams(left)
-+    right_bigrams = _text_bigrams(right)
-+    if not left_bigrams or not right_bigrams:
-+        return False
-+    smaller = min(len(left_bigrams), len(right_bigrams))
-+    return len(left_bigrams & right_bigrams) / smaller >= _NEAR_DUPLICATE_THRESHOLD
++    # 字面相似无法证明主体、否定和时间一致；只折叠空白差异。
++    left_text = re.sub(r"\s+", "", str(left or ""))
++    right_text = re.sub(r"\s+", "", str(right or ""))
++    return bool(left_text) and left_text == right_text
 +
  
  @dataclass
  class HeuristicMemoryRecallState:
-@@ -191,20 +233,74 @@ class HeuristicMemoryInjector:
+@@ -191,20 +235,74 @@ class HeuristicMemoryInjector:
              return []
  
          resolved_sources = await self._resolve_hit_sources_by_hash(result.hits)
@@ -1196,7 +1355,7 @@ index be09f93a8..26854a877 100644
 +
 +        # 第一遍：先给当前会话保底名额，防止全局候选被外群挤占后本会话记忆全军覆没。
 +        for hit, resolved_source, original_index in allowed_hits:
-+            if current_selected >= _CURRENT_SESSION_QUOTA:
++            if current_selected >= _CURRENT_SESSION_QUOTA or len(selected) >= limit:
 +                break
 +            content = str(hit.content or "").strip()
 +            key = _key_of(hit, content)
@@ -1236,7 +1395,7 @@ index be09f93a8..26854a877 100644
  
      async def _resolve_hit_sources_by_hash(self, hits: Sequence[MemoryHit]) -> dict[str, str]:
          paragraph_hashes = [hit.hash_value for hit in hits if hit.hash_value and not self._hit_has_scope_hint(hit)]
-@@ -244,6 +340,25 @@ class HeuristicMemoryInjector:
+@@ -244,6 +342,25 @@ class HeuristicMemoryInjector:
          source = str(hit.source or "").strip()
          return source.startswith(_SOURCE_CHAT_SUMMARY_PREFIX) or source.startswith(_SOURCE_PERSON_FACT_PREFIX)
  
@@ -1262,7 +1421,21 @@ index be09f93a8..26854a877 100644
      def _is_hit_allowed(
          self,
          hit: MemoryHit,
-@@ -374,6 +489,7 @@ class HeuristicMemoryInjector:
+@@ -301,10 +418,11 @@ class HeuristicMemoryInjector:
+         if source_session is None:
+             return False
+ 
++        if not source_session.is_group_session:
++            # 私聊摘要仅能回到原会话，跨聊共享开关不授予私人内容传播权限。
++            return False
+         if source_session.is_group_session and not current_session.is_group_session:
+             return config.heuristic_memory_group_to_private_enabled
+-        if not source_session.is_group_session and current_session.is_group_session:
+-            return config.heuristic_memory_private_to_group_enabled
+         return True
+ 
+     @staticmethod
+@@ -374,6 +492,7 @@ class HeuristicMemoryInjector:
          lines = [
              HEURISTIC_MEMORY_REFERENCE_MARKER,
              "Internal long-term memory recalled from the current chat impression. Use it only as reasoning context; do not quote it verbatim to the user.",
@@ -1298,7 +1471,7 @@ index c62bcba61..3afd89c7e 100644
          "使用时把它当作对当前人物的背景理解；若与当前对话冲突，以当前对话为准。"
      )
 diff --git a/src/maisaka/reasoning_engine.py b/src/maisaka/reasoning_engine.py
-index 03b547d9f..672cce0ed 100644
+index 03b547d9f..f3b18f8b2 100644
 --- a/src/maisaka/reasoning_engine.py
 +++ b/src/maisaka/reasoning_engine.py
 @@ -140,6 +140,9 @@ class CycleRuntimeState:
@@ -1326,7 +1499,15 @@ index 03b547d9f..672cce0ed 100644
                  interrupt_flag.set()
              planner_task = asyncio.create_task(
                  self._runtime._chat_loop_service.chat_loop_step(
-@@ -929,6 +937,8 @@ class MaisakaReasoningEngine:
+@@ -916,6 +924,7 @@ class MaisakaReasoningEngine:
+ 
+                 cached_messages = turn_start_context.cached_messages
+                 trigger_message = turn_start_context.trigger_message
++                self._tool_caller_ids = self._speaker_ids_from_messages(cached_messages)
+ 
+                 if turn_start_context.silent_reply_frequency:
+                     await self._handle_silent_turn(
+@@ -929,6 +938,8 @@ class MaisakaReasoningEngine:
                      self._turn_passive_replyer = global_config.experimental.passive_replyer
                      self._runtime._chat_loop_service.passive_replyer_override = self._turn_passive_replyer
                      self._active_logical_turn_id = turn_start_context.logical_turn_id or uuid.uuid4().hex
@@ -1335,62 +1516,80 @@ index 03b547d9f..672cce0ed 100644
                      if force_continue_reason := self._runtime._consume_forced_turn_reason():
                          logger.info(f"{self._runtime.log_prefix} {force_continue_reason}")
                      round_index = 0
-@@ -1447,6 +1457,30 @@ class MaisakaReasoningEngine:
+@@ -945,6 +956,7 @@ class MaisakaReasoningEngine:
+                             await self._refresh_visual_placeholders_for_cycle(cycle_detail)
+                             await self._post_process_chat_history_after_cycle(cycle_detail, consume_references=False)
+ 
++                            self._tool_caller_ids = self._speaker_ids_from_messages(cached_messages)
+                             self._runtime._start_planner_continuation()
+                             await self._run_planner_request(
+                                 trigger_message=trigger_message,
+@@ -1001,6 +1013,7 @@ class MaisakaReasoningEngine:
+                             if not state.planner_interrupted:
+                                 round_index += 1
+                 finally:
++                    self._tool_caller_ids = []
+                     self._turn_passive_replyer = None
+                     self._runtime._chat_loop_service.passive_replyer_override = None
+                     self._active_logical_turn_id = None
+@@ -1447,6 +1460,24 @@ class MaisakaReasoningEngine:
              f"工具={tool_call.func_name} 调用ID={tool_call.call_id}"
          )
  
 +    @staticmethod
-+    def _current_speaker_ids(runtime: "MaisakaHeartFlowChatting") -> list[str]:
-+        """本批消息里出现过的发言者 QQ（群聊/私聊都适用，保持出现顺序去重）。
-+
-+        chat_stream.user_id 在群聊里是空的，只有私聊才填对端 QQ，所以必须从消息本身取。
-+        """
-+
-+        def _uid_of(message: object) -> str:
-+            info = getattr(message, "message_info", None)
-+            user_info = getattr(info, "user_info", None) if info is not None else None
-+            return str(getattr(user_info, "user_id", "") or "").strip()
-+
++    def _speaker_ids_from_messages(messages: list) -> list[str]:
++        """仅取本轮真实消息；缺少身份时整批不授予调用者权限。"""
 +        seen: list[str] = []
-+        for message in list(getattr(runtime, "message_cache", None) or []):
-+            uid = _uid_of(message)
-+            if uid and uid not in seen:
++        for message in messages:
++            info = getattr(message, "message_info", None)
++            user_info = getattr(info, "user_info", None)
++            uid = str(getattr(user_info, "user_id", "") or "").strip()
++            if not uid or getattr(message, "is_notify", False):
++                return []
++            if uid not in seen:
 +                seen.append(uid)
-+        if not seen:
-+            chat_stream = getattr(runtime, "chat_stream", None)
-+            fallback = str(getattr(chat_stream, "user_id", "") or "").strip()
-+            if fallback:
-+                seen.append(fallback)
 +        return seen
++
++    def _current_speaker_ids(self, runtime: "MaisakaHeartFlowChatting") -> list[str]:
++        """权限身份固定于本次请求，不从历史缓存或私聊对端推断。"""
++        return list(getattr(self, "_tool_caller_ids", []))
 +
      def _build_tool_availability_context(self) -> ToolAvailabilityContext:
          """构造当前聊天的工具暴露上下文。"""
  
-@@ -1456,7 +1490,7 @@ class MaisakaReasoningEngine:
+@@ -1456,7 +1487,7 @@ class MaisakaReasoningEngine:
              stream_id=self._runtime.session_id,
              is_group_chat=chat_stream.is_group_session,
              group_id=str(getattr(chat_stream, "group_id", "") or "").strip(),
 -            user_id=str(getattr(chat_stream, "user_id", "") or "").strip(),
-+            user_id=(speakers[-1] if (speakers := self._current_speaker_ids(self._runtime)) else ""),
++            user_id=(speakers[0] if len(speakers := self._current_speaker_ids(self._runtime)) == 1 else ""),
              platform=str(getattr(chat_stream, "platform", "") or "").strip(),
          )
  
-@@ -1480,8 +1514,9 @@ class MaisakaReasoningEngine:
+@@ -1480,8 +1511,9 @@ class MaisakaReasoningEngine:
              reasoning=latest_thought,
              is_group_chat=chat_stream.is_group_session,
              group_id=str(getattr(chat_stream, "group_id", "") or "").strip(),
 -            user_id=str(getattr(chat_stream, "user_id", "") or "").strip(),
-+            user_id=(speakers[-1] if (speakers := self._current_speaker_ids(self._runtime)) else ""),
++            user_id=(speakers[0] if len(speakers := self._current_speaker_ids(self._runtime)) == 1 else ""),
              platform=str(getattr(chat_stream, "platform", "") or "").strip(),
 +            metadata={"speaker_ids": self._current_speaker_ids(self._runtime)},
          )
  
      @staticmethod
-@@ -2144,6 +2179,10 @@ class MaisakaReasoningEngine:
+@@ -2142,8 +2174,17 @@ class MaisakaReasoningEngine:
+             next_call_id = tool_calls[tool_index].call_id if tool_index < total_tool_count else ""
+             await self._emit_planner_progress(cycle_detail, state, tool_monitor_results, next_call_id)
  
++            reply_visible = tool_call.func_name == "reply" and (
++                result.success or bool(result.metadata.get("sent_message_ids"))
++                or any(item.get("success") is True for item in result.metadata.get("send_results", []) if isinstance(item, dict))
++            )
              if not result.success and tool_call.func_name == "reply":
-                 logger.warning(f"{self._runtime.log_prefix} 回复工具未生成可见消息，将继续下一轮循环")
-+            if result.success and tool_call.func_name == "reply":
+-                logger.warning(f"{self._runtime.log_prefix} 回复工具未生成可见消息，将继续下一轮循环")
++                detail = "部分消息已送达，后续发送失败" if reply_visible else "未生成可见消息"
++                logger.warning(f"{self._runtime.log_prefix} 回复工具{detail}，将继续下一轮循环")
++            if reply_visible:
 +                # 已经开口：本回合后续轮次不再被新消息打断，让她把补充说完。
 +                state.reply_sent = True
 +                self._runtime._turn_reply_sent = True
@@ -1398,10 +1597,36 @@ index 03b547d9f..672cce0ed 100644
              if result.success and result.stop_after_execution:
                  should_stop_after_execution = True
 diff --git a/src/maisaka/runtime.py b/src/maisaka/runtime.py
-index bcc8f7071..cee1b6971 100644
+index bcc8f7071..c9b635c7a 100644
 --- a/src/maisaka/runtime.py
 +++ b/src/maisaka/runtime.py
-@@ -1048,6 +1048,13 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
+@@ -1004,12 +1004,25 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
+         except RuntimeError as exc:
+             logger.debug(f"{self.log_prefix} 广播收到消息到监控面板失败: {exc}")
+ 
++    async def register_silent_message(self, message: SessionMessage) -> None:
++        """保存待纳入上下文的静默消息，不更新唤醒、打断或授权状态。"""
++        async with self._message_ingest_lock:
++            pending = getattr(self, "_silent_messages", [])
++            if all(item.message_id != message.message_id for item in pending):
++                pending.append(message)
++            self._silent_messages = pending[-max(1, self._max_context_size):]
++
+     async def register_message(self, message: SessionMessage) -> None:
+         """缓存一条新消息并唤醒主循环。"""
+         await focus_mode_manager.reconcile(self)
+         async with self._message_ingest_lock:
+             if not self._running:
+                 raise RuntimeError(f"聊天运行时已停止，不能接收入站消息：{self.session_id}")
++            for silent in getattr(self, "_silent_messages", []):
++                history_message = await self._reasoning_engine._build_history_message(silent)
++                if history_message is not None:
++                    self._chat_history.append(history_message)
++            self._silent_messages = []
+             await self._register_message(message)
+ 
+     async def _register_message(self, message: SessionMessage) -> None:
+@@ -1048,6 +1061,13 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
          """快速反应模式下，用新消息打断运行中的 Planner。"""
          if not global_config.chat.reply_timing.planner_message_steering or self._agent_state != self._STATE_RUNNING:
              return
@@ -1416,13 +1641,47 @@ index bcc8f7071..cee1b6971 100644
          request_result = self._planner_interrupt.request()
          if request_result == "idle":
 diff --git a/src/plugin_runtime/component_query.py b/src/plugin_runtime/component_query.py
-index 6bff5e77c..7b2457ee2 100644
+index 6bff5e77c..c74730874 100644
 --- a/src/plugin_runtime/component_query.py
 +++ b/src/plugin_runtime/component_query.py
-@@ -828,6 +828,15 @@ class ComponentQueryService:
+@@ -752,24 +752,10 @@ class ComponentQueryService:
+         group_id = str(context.group_id or "").strip()
+         user_id = str(context.user_id or "").strip()
+         platform = str(context.platform or "").strip()
+-        if group_id:
+-            payload["group_id"] = group_id
+-        if user_id:
+-            payload["user_id"] = user_id
+-        if platform:
+-            payload["platform"] = platform
+-
+-        anchor_message = context.metadata.get("anchor_message")
+-        message_info = getattr(anchor_message, "message_info", None)
+-        group_info = getattr(message_info, "group_info", None)
+-        user_info = getattr(message_info, "user_info", None)
+-
+-        anchor_group_id = str(getattr(group_info, "group_id", "") or "").strip()
+-        anchor_user_id = str(getattr(user_info, "user_id", "") or "").strip()
+-        if anchor_group_id:
+-            payload["group_id"] = anchor_group_id
+-        if anchor_user_id:
+-            payload["user_id"] = anchor_user_id
++        # 身份字段即使为空也必须保留，模型参数和引用消息不能补成另一个人。
++        payload["group_id"] = group_id
++        payload["user_id"] = user_id
++        payload["platform"] = platform
+         return payload
+ 
+     @staticmethod
+@@ -828,6 +814,20 @@ class ComponentQueryService:
          for key, value in context_payload.items():
              if key not in payload or not payload.get(key):
                  payload[key] = value
++        if entry.plugin_id == "Rabbit-Jia-Er.MaiTrace":
++            # 此插件使用 user_id/stream_id 做调用者鉴权，不能让模型覆盖。
++            payload.update(context_payload)
++            if context is None:
++                payload.update(user_id="", group_id="", platform="", stream_id="", chat_id="")
 +        if entry.plugin_id == "deepsleep.daily-report" and entry.name == "query_today_usage":
 +            # 财务查询的鉴权上下文只能由 Host 生成，模型传参不得覆盖。
 +            payload["_usage_context"] = None if context is None else {
