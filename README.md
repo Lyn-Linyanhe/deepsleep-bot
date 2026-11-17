@@ -106,16 +106,18 @@ flowchart TB
 
 ## 测试
 
-当前审计修复回归为 `tests/test_audit_repairs.py`，19 项离线检查（源码函数隔离执行、假消息与临时数据库，不访问生产数据库、不联网）。运行方式见 [tests/README.md](tests/README.md)。原有 7 组、112 项测试属于旧补丁快照，不能当作当前版本全部通过的证明。
+当前审计回归为 `tests/test_audit_repairs.py`（19项），记忆优化回归为 `tests/test_memory_optimization.py`（8项）；另有 `tests/test_loopback_proxy_routing.py`，使用本地假服务验证回环代理路由。测试不访问生产数据库、不调用真实模型，运行方式见 [tests/README.md](tests/README.md)。原有7组、112项属于旧补丁快照，不代表当前版本全部通过。
 
 ```bash
 set DEEPSLEEP_WORKSPACE=D:\deepsleep
 python tests/test_audit_repairs.py
+python tests/test_memory_optimization.py
+python tests/test_loopback_proxy_routing.py
 ```
 
 ## 相对 MaiBot 上游的改动
 
-基线 **MaiBot v1.3.18（2026-10）**，累计补丁见 `patches/0001-maibot-deepsleep-customizations.patch`。2026-11-17 同步两批审计修复；MaiTrace 的独立补丁及固定基线见 [patches/README.md](patches/README.md)。修复范围与尚未解决的边界见 [审计更新](docs/audit-update-20261117.md)。
+基线 **MaiBot v1.3.18（2026-10）**，累计补丁见 `patches/0001-maibot-deepsleep-customizations.patch`。2026-11-17 同步两批审计修复与后续记忆优化；MaiTrace 的独立补丁及固定基线见 [patches/README.md](patches/README.md)。详细记录见 [审计更新](docs/audit-update-20261117.md) 与 [记忆更新](docs/memory-update-20261117.md)。
 
 - **记忆系统**：注入侧占位/近重复过滤与跨会话配额、检索遥测、段落时效衰减（24h 半衰期，取访问前快照避免结构性空转）、写侧占位总结拦截、画像与事实写回的模型链拆分
 - **表达学习**：快模式语境加权、反馈闭环（被怼 -1 / 表情回应 +1）、黑话毕业线调整
@@ -129,9 +131,10 @@ python tests/test_audit_repairs.py
 - 摘要触发自适应（攒满 60 条或 15 条且距上次 ≥6h），冷群不断更
 - 段落召回时效衰减：24h 半衰期、下限 0.15、只在排序层生效不破召回集
 - 注入去重：只合并去空白后相同文本，保留不同主体和否定事实；占位过滤仅匹配明确的完整空增量裁决
-- 访问计数：候选阶段只算时效，最终 SDK 返回后计数；私聊摘要自动注入限制在原会话
+- 访问计数：候选阶段只算时效，启发式回忆按最终采用集合确认计数；普通查询保持默认计数，私聊摘要自动注入限制在原会话
+- 注入预算：按完整条目计算说明、编号和正文占用，不再截出半句话
 - 检索遥测：`记忆检索遥测: mode= hits= duration_ms=`，无查询正文
-- 查询蒸馏：用摘要式查询替代原始消息拼接，hit@5 从 22.5% → 97.5%
+- 查询基准：历史上用摘要片段回查的hit@5为97.5%、原始消息拼接为22.5%；前者含目标原文，不能视为真实聊天问答准确率
 
 ## 表达与说话
 
